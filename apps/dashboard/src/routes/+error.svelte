@@ -1,0 +1,103 @@
+<script>
+  import { goto } from '$app/navigation';
+  import { page } from '$app/state';
+  import { Button } from '@cio/ui/base/button';
+  import { Empty } from '@cio/ui/custom/empty';
+  import { ExternalLinkIcon, HomeIcon, HoverableItem } from '@cio/ui/custom/moving-icons';
+  import { MachineBrokenTrack, MachineRunnerBorder } from '@cio/ui/custom/animation';
+
+  let runnerState = $state({ status: 'idle', passed: 0, isNewRecord: false });
+
+  const isPlaying = $derived(runnerState.status !== 'idle');
+  const isNotFound = $derived(page.status === 404);
+  const isOrgSite = $derived(Boolean(page.data.isOrgSite));
+
+  console.error('Error message:', page.error?.message);
+  console.error('Error page:', page.url);
+
+  function goHome() {
+    if (isOrgSite) {
+      goto('/');
+      return;
+    }
+
+    window.location.href = 'https://classroomio.com';
+  }
+
+  function continueLearning() {
+    goto('/lms');
+  }
+</script>
+
+<svelte:head>
+  <title>{isNotFound ? 'Page not found' : 'Something unexpected occurred'}</title>
+</svelte:head>
+
+{#snippet gameBorder()}
+  <MachineRunnerBorder snapshot={runnerState} />
+{/snippet}
+
+{#snippet brokenTrack()}
+  <div class="mx-auto w-full {isPlaying ? '' : 'h-72 max-w-[480px]'}" style:--machine-face="var(--background)">
+    <MachineBrokenTrack onstatechange={(next) => (runnerState = next)} />
+  </div>
+{/snippet}
+
+{#if isNotFound}
+  <Empty
+    title="Page not found"
+    description="The page you're looking for doesn't exist or you don't have permission to view it."
+    variant="page"
+    layout="full-page"
+    showLogo={true}
+    media={brokenTrack}
+    size="lg"
+    mediaOnly={isPlaying}
+    overlay={isPlaying ? gameBorder : undefined}
+  >
+    <div class="flex items-center gap-2">
+      {#if isOrgSite}
+        <Button variant="link" onclick={continueLearning}>Continue Learning</Button>
+      {/if}
+      <HoverableItem>
+        {#snippet children(isHovered)}
+          <Button onclick={goHome}>
+            <HomeIcon {isHovered} size={16} ariaHidden={true} />
+            Go Home
+          </Button>
+        {/snippet}
+      </HoverableItem>
+    </div>
+  </Empty>
+{:else}
+  <Empty
+    title="Something unexpected occurred."
+    description="Don't worry, your learning is safe. It isn't your fault, it is ours. We have gotten the error notification and will push a fix ASAP. In the meantime, take a short break and come back a bit later."
+    variant="page"
+    layout="full-page"
+    showLogo={true}
+    media={brokenTrack}
+    size="lg"
+    mediaOnly={isPlaying}
+    overlay={isPlaying ? gameBorder : undefined}
+  >
+    <div class="flex gap-2">
+      <HoverableItem>
+        {#snippet children(isHovered)}
+          <Button href="https://classroomio.com/changelog" variant="secondary" size="xs">
+            <ExternalLinkIcon {isHovered} size={16} ariaHidden={true} />
+            Explore our Changelog
+          </Button>
+        {/snippet}
+      </HoverableItem>
+      <HoverableItem>
+        {#snippet children(isHovered)}
+          <Button size="xs" onclick={goHome}>
+            <HomeIcon {isHovered} size={16} ariaHidden={true} />
+            Go Home
+          </Button>
+        {/snippet}
+      </HoverableItem>
+    </div>
+  </Empty>
+{/if}

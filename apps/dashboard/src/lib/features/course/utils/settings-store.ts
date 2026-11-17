@@ -1,0 +1,48 @@
+import type { TCourseType } from '@cio/db/types';
+import type { CourseProgressionMode } from '@cio/utils/functions/course-progression';
+import type { TCourseCallout } from '@cio/utils/validation/course';
+import { writable } from 'svelte/store';
+
+import type { LiveSessionReminderRow } from './types';
+
+type CourseSettings = {
+  bannerImage: string;
+  courseTitle: string;
+  courseDescription: string;
+  grading: boolean;
+  type: TCourseType;
+  allowSelfEnrollment: boolean;
+  lessonDownload: boolean;
+  allowMarkdownExport: boolean;
+  isPublished: boolean;
+  isContentGroupingEnabled: boolean;
+  progressionMode: CourseProgressionMode;
+  commentsEnabled: boolean;
+  callout: TCourseCallout | null;
+  welcomeEmailMessage: string;
+  liveSessionReminders: LiveSessionReminderRow[];
+  certificate: {
+    deadline: string | null;
+  };
+};
+
+export const settings = writable<CourseSettings>({
+  bannerImage: '',
+  courseTitle: '',
+  courseDescription: '',
+  grading: false,
+  type: 'SELF_PACED' as TCourseType,
+  allowSelfEnrollment: true,
+  lessonDownload: false,
+  allowMarkdownExport: false,
+  isPublished: false,
+  isContentGroupingEnabled: true,
+  progressionMode: 'free',
+  commentsEnabled: true,
+  callout: null,
+  welcomeEmailMessage: '',
+  liveSessionReminders: [],
+  certificate: {
+    deadline: null
+  }
+});

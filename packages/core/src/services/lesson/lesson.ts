@@ -1,0 +1,842 @@
+import { AppError, ErrorCodes } from '@cio/utils/errors';
+import { sanitizeHtml } from '../../utils/sanitize-html';
+import type { TLesson, TNewLessonComment, TNewLessonCompletion } from '@cio/db/types';
+import type { TBlockChangeSource } from '@cio/utils/constants/lesson-version';
+import type { TLessonCreate, TLessonUpdate } from '@cio/utils/validation/lesson';
+import {
+  createLessonComment,
+  createLessons,
+  deleteLesson,
+  deleteLessonComment,
+  getLessonById,
+  getLessonRowById,
+  getLessonCommentsAvailability,
+  getLessonCommentsAvailabilityByCommentId,
+  getLessonCommentsByLessonId,
+  getLessonCommentsByLessonIdPaginated,
+  getLessonCompletion,
+  getLessonVideoProgress,
+  getLessonVideoProgressForLesson,
+  getLessonsByCourseId,
+  getPaginatedLessonsByCourseId,
+  updateLesson,
+  updateLessonComment,
+  upsertLessonCompletion,
+  upsertLessonVideoProgress,
+  type LessonById
+} from '@cio/db/queries/lesson';
+import type { TUpdateLessonWatchProgress } from '@cio/utils/validation/lesson';
+import { skipActiveReminderDeliveriesForLesson, touchCourseUpdatedAt } from '@cio/db/queries/course';
+import { deleteAssetUsagesByTarget } from '@cio/db/queries/assets';
+import { listLessonBlockRows } from '@cio/db/queries/block';
+import type { LessonBlock } from '../block/block-view';
+import { db } from '@cio/db/drizzle';
+import {
+  applyLegacyLessonContent,
+  attachBlocksToLesson,
+  attachBlocksToLessons,
+  splitLegacyContent
+} from '../block/legacy-content';
+import { resolveWatchEnforcedAssetIds } from '../../utils/lesson-watch-enforcement';
+import { resolveItemSlug } from '../course/slug';
+import { claimItemOrder } from '../course/root-order';
+import { invalidateAnalyticsCourseStructure } from '../../utils/redis/analytics-cache';
+import { emitCourseWebhookEvent } from '../webhook/emit';
+import { captureCourseEvent } from '../posthog';
+
+export { getLessonHistoryService, getLessonTextHistoryService, type LessonStructureChange } from './lesson-history';
+
+/**
+ * Creates a new lesson
+ * @param courseId Course ID
+ * @param data Lesson creation data
+ * @returns Created lesson
+ */
+export async function createLesson(
+  courseId: string,
+  data: TLessonCreate,
+  options: { actorProfileId?: string | null; source?: TBlockChangeSource; clientName?: string | null } = {}
+): Promise<TLesson> {
+  try {
+    const slug = await resolveItemSlug({
+      courseId,
+      title: data.title,
+      requestedSlug: data.slug
+    });
+
+    const { note, videos, ...lessonFields } = data;
+    const lessonData = {
+      ...lessonFields,
+      courseId,
+      slug,
+      isUnlocked: data.isUnlocked ?? true
+    };
+
+    const createdLesson = await db.transaction(async (tx) => {
+      const order = await claimItemOrder(courseId, { sectionId: data.sectionId }, data.order, null, tx);
+      const [inserted] = await createLessons([{ ...lessonData, order }], tx);
+      if (inserted) {
+        await applyLegacyLessonContent(
+          inserted.id,
+          { note, videos },
+          {
+            actorProfileId: options.actorProfileId,
+            source: options.source,
+            clientName: options.clientName,
+            dbClient: tx
+          }
+        );
+      }
+
+      return inserted;
+    });
+    if (!createdLesson) {
+      throw new AppError('Failed to create lesson', ErrorCodes.INTERNAL_ERROR, 500);
+    }
+    const lesson = await attachBlocksToLesson(createdLesson);
+
+    await touchCourseUpdatedAt(courseId);
+    void invalidateAnalyticsCourseStructure(courseId);
+
+    if (data.lessonAt) {
+      await emitCourseWebhookEvent(courseId, 'lesson.session.scheduled', {
+        lessonId: lesson.id,
+        startsAt: lesson.lessonAt,
+        previousStartsAt: null,
+        callUrl: lesson.callUrl,
+        actorProfileId: options.actorProfileId ?? null
+      });
+    }
+
+    return lesson;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to create lesson',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Gets a lesson by ID
+ * @param lessonId Lesson ID
+ * @returns Lesson or throws error if not found
+ */
+export async function getLesson(lessonId: string): Promise<LessonById & { blocks: LessonBlock[] }> {
+  try {
+    const lesson = await getLessonById(lessonId);
+    if (!lesson) {
+      throw new AppError('Lesson not found', ErrorCodes.LESSON_NOT_FOUND, 404);
+    }
+
+    return await attachBlocksToLesson(lesson, { enrich: true });
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    // Log error with context for debugging
+    const errorMessage = error instanceof Error ? error.message : 'Failed to fetch lesson';
+    console.error(`Error fetching lesson ${lessonId}:`, errorMessage, error);
+
+    throw new AppError(errorMessage, ErrorCodes.LESSON_FETCH_FAILED, 500);
+  }
+}
+
+function hasSessionMoved(
+  before: Pick<TLesson, 'lessonAt' | 'callUrl'>,
+  after: Pick<TLesson, 'lessonAt' | 'callUrl'>
+): boolean {
+  const beforeAt = before.lessonAt ? new Date(before.lessonAt).getTime() : null;
+  const afterAt = after.lessonAt ? new Date(after.lessonAt).getTime() : null;
+
+  return beforeAt !== afterAt || (before.callUrl ?? null) !== (after.callUrl ?? null);
+}
+
+/**
+ * Updates a lesson
+ * @param lessonId Lesson ID
+ * @param data Partial lesson update data
+ * @returns Updated lesson
+ */
+export async function updateLessonService(
+  lessonId: string,
+  data: TLessonUpdate,
+  options: { actorProfileId?: string | null; source?: TBlockChangeSource; clientName?: string | null } = {}
+): Promise<TLesson> {
+  try {
+    const { patch: contentPatch, rest } = splitLegacyContent(data);
+    const payload = { ...rest };
+    const touchesSession = payload.lessonAt !== undefined || payload.callUrl !== undefined;
+    const needsExisting = payload.slug !== undefined || payload.order !== undefined || touchesSession;
+    const existing = needsExisting ? await getLessonById(lessonId) : null;
+
+    if (payload.slug !== undefined) {
+      if (!existing) {
+        throw new AppError('Lesson not found', ErrorCodes.LESSON_NOT_FOUND, 404);
+      }
+      if (!existing.courseId) {
+        throw new AppError('Lesson has no course', ErrorCodes.LESSON_NOT_FOUND, 404);
+      }
+
+      payload.slug = await resolveItemSlug({
+        courseId: existing.courseId,
+        title: payload.title ?? existing.title,
+        requestedSlug: payload.slug,
+        ignoreItemSlug: existing.slug ?? undefined
+      });
+    }
+
+    const sectionId = payload.sectionId === undefined ? existing?.sectionId : payload.sectionId;
+    const orderCourseId = payload.order !== undefined ? existing?.courseId : null;
+    const hasLessonFields = Object.keys(payload).length > 0;
+    const updatedRow = await db.transaction(async (tx) => {
+      if (orderCourseId) {
+        payload.order = await claimItemOrder(orderCourseId, { sectionId }, payload.order, lessonId, tx);
+      }
+
+      const row = hasLessonFields ? await updateLesson(lessonId, payload, tx) : await getLessonRowById(lessonId, tx);
+      if (row) {
+        await applyLegacyLessonContent(lessonId, contentPatch, {
+          actorProfileId: options.actorProfileId,
+          source: options.source,
+          clientName: options.clientName,
+          dbClient: tx
+        });
+      }
+
+      return row;
+    });
+    if (!updatedRow) {
+      throw new AppError('Failed to update lesson', ErrorCodes.INTERNAL_ERROR, 500);
+    }
+    const updated = await attachBlocksToLesson(updatedRow);
+
+    if (updated.courseId) {
+      await touchCourseUpdatedAt(updated.courseId);
+
+      const hasStructureChange =
+        payload.title !== undefined ||
+        payload.order !== undefined ||
+        payload.sectionId !== undefined ||
+        payload.isUnlocked !== undefined;
+
+      if (hasStructureChange) {
+        void invalidateAnalyticsCourseStructure(updated.courseId);
+      }
+    }
+
+    if (existing && hasSessionMoved(existing, updated)) {
+      await skipActiveReminderDeliveriesForLesson(lessonId, 'lesson_rescheduled');
+
+      if (updated.courseId) {
+        await emitCourseWebhookEvent(updated.courseId, 'lesson.session.scheduled', {
+          lessonId,
+          startsAt: updated.lessonAt,
+          previousStartsAt: existing.lessonAt,
+          callUrl: updated.callUrl,
+          actorProfileId: options.actorProfileId ?? null
+        });
+      }
+    }
+
+    return updated;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to update lesson',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Deletes a lesson
+ * @param lessonId Lesson ID
+ * @returns Deleted lesson
+ */
+export async function deleteLessonService(lessonId: string): Promise<TLesson> {
+  try {
+    const deleted = await db.transaction(async (tx) => {
+      const lesson = await deleteLesson(lessonId, tx);
+      if (!lesson) {
+        return null;
+      }
+
+      // asset_usages.target_id has no FK to lesson, so the lesson delete does
+      // not cascade here. Prune its usage rows in the same transaction to avoid
+      // orphaned attachments that would otherwise block deleting those assets.
+      await deleteAssetUsagesByTarget('lesson', lessonId, tx);
+
+      return lesson;
+    });
+
+    if (!deleted) {
+      throw new AppError('Failed to delete lesson', ErrorCodes.INTERNAL_ERROR, 500);
+    }
+
+    if (deleted.courseId) {
+      await touchCourseUpdatedAt(deleted.courseId);
+      void invalidateAnalyticsCourseStructure(deleted.courseId);
+    }
+
+    return deleted;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to delete lesson',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Lists lessons for a course
+ * @param courseId Course ID
+ * @param sectionId Optional section ID filter
+ * @returns Array of lessons
+ */
+export async function listLessons(courseId: string, sectionId?: string): Promise<TLesson[]> {
+  try {
+    const lessons = await getLessonsByCourseId(courseId);
+    const visibleLessons = sectionId ? lessons.filter((lesson) => lesson.sectionId === sectionId) : lessons;
+
+    return await attachBlocksToLessons(visibleLessons);
+  } catch (error) {
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to list lessons',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Lists one page of a course's lessons, in course order
+ * @param courseId Course ID
+ * @param options Section filter and page options
+ * @returns Lessons on the page and the total count
+ */
+export async function listLessonsPaginated(
+  courseId: string,
+  options: { sectionId?: string; page: number; limit: number }
+): Promise<{ items: TLesson[]; total: number }> {
+  try {
+    const page = await getPaginatedLessonsByCourseId(courseId, options);
+    const items = await attachBlocksToLessons(page.items);
+
+    return { items, total: page.total };
+  } catch (error) {
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to list lessons',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+async function assertLessonCommentsEnabled(lessonId: string) {
+  const availability = await getLessonCommentsAvailability(lessonId);
+  if (!availability) {
+    throw new AppError('Lesson not found', ErrorCodes.LESSON_NOT_FOUND, 404);
+  }
+
+  if (
+    !availability.organizationCommentsEnabled ||
+    !availability.courseCommentsEnabled ||
+    !availability.lessonCommentsEnabled
+  ) {
+    throw new AppError('Comments are disabled for this lesson', ErrorCodes.COMMENTS_DISABLED, 403);
+  }
+}
+
+async function assertLessonCommentsEnabledForComment(commentId: number) {
+  const availability = await getLessonCommentsAvailabilityByCommentId(commentId);
+  if (!availability) {
+    throw new AppError('Comment not found', ErrorCodes.COMMENT_NOT_FOUND, 404);
+  }
+
+  if (
+    !availability.organizationCommentsEnabled ||
+    !availability.courseCommentsEnabled ||
+    !availability.lessonCommentsEnabled
+  ) {
+    throw new AppError('Comments are disabled for this lesson', ErrorCodes.COMMENTS_DISABLED, 403);
+  }
+}
+
+/**
+ * Gets comments for a lesson
+ * @param lessonId Lesson ID
+ * @returns Array of comments
+ */
+export async function getLessonComments(lessonId: string) {
+  try {
+    await assertLessonCommentsEnabled(lessonId);
+
+    return getLessonCommentsByLessonId(lessonId);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to get lesson comments',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Gets paginated comments for a lesson
+ * @param lessonId Lesson ID
+ * @param options Pagination options (cursor, limit)
+ * @returns Paginated comments with metadata
+ */
+export async function getLessonCommentsPaginated(lessonId: string, options: { cursor?: string; limit: number }) {
+  try {
+    await assertLessonCommentsEnabled(lessonId);
+
+    return getLessonCommentsByLessonIdPaginated(lessonId, options);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to get paginated lesson comments',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Creates a lesson comment
+ * @param lessonId Lesson ID
+ * @param groupMemberId Group member ID (author)
+ * @param comment Comment text
+ * @returns Created comment
+ */
+export async function createLessonCommentService(lessonId: string, groupMemberId: string, comment: string) {
+  try {
+    await assertLessonCommentsEnabled(lessonId);
+
+    const commentData: TNewLessonComment = {
+      lessonId,
+      groupmemberId: groupMemberId,
+      comment: sanitizeHtml(comment)
+    };
+
+    return await createLessonComment(commentData);
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to create lesson comment',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Updates a lesson comment
+ * @param commentId Comment ID
+ * @param comment Updated comment text
+ * @returns Updated comment
+ */
+export async function updateLessonCommentService(commentId: number, comment: string) {
+  try {
+    await assertLessonCommentsEnabledForComment(commentId);
+
+    const updated = await updateLessonComment(commentId, sanitizeHtml(comment));
+    if (!updated) {
+      throw new AppError('Comment not found', ErrorCodes.LESSON_COMMENT_UPDATE_FAILED, 404);
+    }
+
+    return updated;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to update lesson comment',
+      ErrorCodes.LESSON_COMMENT_UPDATE_FAILED,
+      500
+    );
+  }
+}
+
+/**
+ * Deletes a lesson comment
+ * @param commentId Comment ID
+ * @returns Deleted comment
+ */
+export async function deleteLessonCommentService(commentId: number) {
+  try {
+    await assertLessonCommentsEnabledForComment(commentId);
+
+    const deleted = await deleteLessonComment(commentId);
+    if (!deleted) {
+      throw new AppError('Comment not found', ErrorCodes.COMMENT_NOT_FOUND, 404);
+    }
+
+    return deleted;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to delete lesson comment',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+// Lesson Completion Services
+
+/**
+ * Gets lesson completion status
+ * @param lessonId Lesson ID
+ * @param profileId Profile ID
+ * @returns Completion record or null
+ */
+export async function getLessonCompletionService(lessonId: string, profileId: string) {
+  try {
+    return await getLessonCompletion(lessonId, profileId);
+  } catch (error) {
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to get lesson completion',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+/**
+ * Creates or updates lesson completion
+ * @param lessonId Lesson ID
+ * @param profileId Profile ID
+ * @param isComplete Completion status
+ * @returns Completion record
+ */
+function captureLessonCompleted(
+  courseId: string,
+  lessonId: string,
+  profileId: string,
+  completionMethod: 'manual' | 'video_watch' | 'admin'
+) {
+  captureCourseEvent(courseId, {
+    event: 'lesson_completed',
+    distinctId: profileId,
+    properties: { lesson_id: lessonId, completion_method: completionMethod }
+  });
+}
+
+export async function upsertLessonCompletionService(
+  lessonId: string,
+  profileId: string,
+  isComplete: boolean,
+  completionMethod: 'manual' | 'admin' = 'manual'
+) {
+  try {
+    const lesson = await getLessonById(lessonId);
+    if (!lesson) {
+      throw new AppError('Lesson not found', ErrorCodes.LESSON_NOT_FOUND, 404);
+    }
+
+    if (lesson.completionPolicy === 'video_watch' && isComplete) {
+      throw new AppError(
+        'This lesson completes automatically when the video watch requirement is met',
+        ErrorCodes.VALIDATION_ERROR,
+        400
+      );
+    }
+
+    const completionData: TNewLessonCompletion = {
+      lessonId,
+      profileId,
+      isComplete
+    };
+
+    const previous = isComplete ? await getLessonCompletion(lessonId, profileId) : null;
+    const completion = await upsertLessonCompletion(completionData);
+
+    await emitCourseWebhookEvent(lesson.courseId, 'lesson.completion.updated', { lessonId, profileId, isComplete });
+
+    if (isComplete && !previous?.isComplete) {
+      captureLessonCompleted(lesson.courseId, lessonId, profileId, completionMethod);
+    }
+
+    return completion;
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to update lesson completion',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+const WATCH_PROGRESS_WALL_CLOCK_TOLERANCE = 1.5;
+
+export type LessonWatchProgressAssetResult = {
+  assetId: string;
+  lastPositionSeconds: number;
+  watchedSeconds: number;
+  furthestSeconds: number;
+  durationSeconds: number | null;
+  watchedPercent: number;
+  isComplete: boolean;
+};
+
+export type LessonWatchProgressResult = {
+  lastPositionSeconds: number;
+  watchedSeconds: number;
+  furthestSeconds: number;
+  durationSeconds: number | null;
+  isComplete: boolean;
+  didJustComplete: boolean;
+  watchedPercent: number;
+  videosComplete: number;
+  videosRequired: number;
+  assets: LessonWatchProgressAssetResult[];
+};
+
+function getWatchedPercent(watchedSeconds: number, durationSeconds: number | null | undefined): number {
+  if (!durationSeconds || durationSeconds <= 0) return 0;
+
+  return Math.min(100, Math.round((watchedSeconds / durationSeconds) * 100));
+}
+
+function buildAggregateWatchProgress(
+  rows: Awaited<ReturnType<typeof getLessonVideoProgressForLesson>>,
+  requiredAssetIds: string[]
+): LessonWatchProgressResult | null {
+  if (requiredAssetIds.length === 0) return null;
+
+  const rowByAssetId = new Map(rows.map((row) => [row.assetId, row]));
+  const assets: LessonWatchProgressAssetResult[] = requiredAssetIds.map((assetId) => {
+    const row = rowByAssetId.get(assetId);
+
+    const isAssetComplete = row?.isComplete ?? false;
+
+    return {
+      assetId,
+      lastPositionSeconds: row?.lastPositionSeconds ?? 0,
+      watchedSeconds: row?.watchedSeconds ?? 0,
+      furthestSeconds: row?.furthestSeconds ?? 0,
+      durationSeconds: row?.durationSeconds ?? null,
+      watchedPercent: isAssetComplete ? 100 : getWatchedPercent(row?.watchedSeconds ?? 0, row?.durationSeconds),
+      isComplete: isAssetComplete
+    };
+  });
+
+  const videosComplete = assets.filter((asset) => asset.isComplete).length;
+  const videosRequired = requiredAssetIds.length;
+  const isComplete = videosRequired > 0 && videosComplete === videosRequired;
+  const watchedPercent = isComplete
+    ? 100
+    : assets.length > 0
+      ? Math.min(...assets.map((asset) => asset.watchedPercent))
+      : 0;
+  const primaryAsset = assets[0];
+
+  return {
+    lastPositionSeconds: primaryAsset?.lastPositionSeconds ?? 0,
+    watchedSeconds: primaryAsset?.watchedSeconds ?? 0,
+    furthestSeconds: primaryAsset?.furthestSeconds ?? 0,
+    durationSeconds: primaryAsset?.durationSeconds ?? null,
+    isComplete,
+    didJustComplete: false,
+    watchedPercent,
+    videosComplete,
+    videosRequired,
+    assets
+  };
+}
+
+export async function getLessonWatchProgressService(
+  lessonId: string,
+  profileId: string
+): Promise<LessonWatchProgressResult | null> {
+  try {
+    const lesson = await getLessonById(lessonId);
+    if (!lesson || lesson.completionPolicy !== 'video_watch') return null;
+
+    const requiredAssetIds = resolveWatchEnforcedAssetIds(lesson.videos, lesson.completionPolicy);
+    if (requiredAssetIds.length === 0) return null;
+
+    const progressRows = await getLessonVideoProgressForLesson(lessonId, profileId);
+    const filteredRows = progressRows.filter((row) => requiredAssetIds.includes(row.assetId));
+
+    return buildAggregateWatchProgress(filteredRows, requiredAssetIds);
+  } catch (error) {
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to get lesson watch progress',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}
+
+export async function updateLessonWatchProgressService(
+  lessonId: string,
+  profileId: string,
+  beat: TUpdateLessonWatchProgress
+): Promise<LessonWatchProgressResult> {
+  try {
+    const lesson = await getLessonById(lessonId);
+    if (!lesson) {
+      throw new AppError('Lesson not found', ErrorCodes.LESSON_NOT_FOUND, 404);
+    }
+
+    if (lesson.completionPolicy !== 'video_watch') {
+      throw new AppError('This lesson does not require video watch tracking', ErrorCodes.VALIDATION_ERROR, 400);
+    }
+
+    if (!beat.assetId) {
+      throw new AppError('Video asset is required for watch progress', ErrorCodes.VALIDATION_ERROR, 400);
+    }
+
+    const requiredAssetIds = resolveWatchEnforcedAssetIds(lesson.videos, lesson.completionPolicy);
+    if (!requiredAssetIds.includes(beat.assetId)) {
+      throw new AppError('This video is not configured for watch enforcement', ErrorCodes.VALIDATION_ERROR, 400);
+    }
+
+    const existing = await getLessonVideoProgress(lessonId, profileId, beat.assetId);
+    const assetPlacements = (await listLessonBlockRows(lessonId)).filter(
+      (row) => row.block.type === 'video' && row.block.data.assetId === beat.assetId
+    );
+    const requiredPlacements = assetPlacements.filter((row) => row.placement.required);
+    const enforcedPlacements = requiredPlacements.length > 0 ? requiredPlacements : assetPlacements;
+    const lessonThreshold = lesson.videoWatchThreshold ?? 95;
+    const placementThresholds = enforcedPlacements.map((row) => row.placement.watchThreshold ?? lessonThreshold);
+    const threshold = placementThresholds.length > 0 ? Math.max(...placementThresholds) : lessonThreshold;
+    const now = Date.now();
+
+    if (existing?.isComplete) {
+      const aggregate = buildAggregateWatchProgress(
+        await getLessonVideoProgressForLesson(lessonId, profileId),
+        requiredAssetIds
+      );
+
+      return {
+        ...(aggregate ?? {
+          lastPositionSeconds: existing.lastPositionSeconds ?? beat.positionSeconds,
+          watchedSeconds: existing.watchedSeconds ?? 0,
+          furthestSeconds: existing.furthestSeconds ?? 0,
+          durationSeconds: existing.durationSeconds ?? beat.durationSeconds,
+          isComplete: true,
+          didJustComplete: false,
+          watchedPercent: 100,
+          videosComplete: requiredAssetIds.length,
+          videosRequired: requiredAssetIds.length,
+          assets: []
+        }),
+        didJustComplete: false
+      };
+    }
+
+    const positionSeconds = Math.floor(beat.positionSeconds);
+
+    if (existing?.updatedAt) {
+      const elapsedSeconds = (now - new Date(existing.updatedAt).getTime()) / 1000;
+      const maxAllowedDelta = Math.max(5, elapsedSeconds * WATCH_PROGRESS_WALL_CLOCK_TOLERANCE);
+
+      if (beat.playedDeltaSeconds > maxAllowedDelta) {
+        throw new AppError('Invalid watch progress update', ErrorCodes.VALIDATION_ERROR, 400);
+      }
+    }
+
+    const previousFurthest = existing?.furthestSeconds ?? 0;
+    const playedDeltaSeconds = Math.max(0, Math.round(beat.playedDeltaSeconds));
+    const reachedEnd = positionSeconds >= beat.durationSeconds - 1;
+    let watchedSeconds = Math.min(beat.durationSeconds, (existing?.watchedSeconds ?? 0) + playedDeltaSeconds);
+
+    if (reachedEnd) {
+      watchedSeconds = beat.durationSeconds;
+    }
+
+    const furthestSeconds = Math.max(previousFurthest, positionSeconds, reachedEnd ? beat.durationSeconds : 0);
+    const watchPercent = (watchedSeconds / beat.durationSeconds) * 100;
+    const assetComplete = watchPercent >= threshold;
+
+    const rowsBeforeUpdate = await getLessonVideoProgressForLesson(lessonId, profileId);
+    const priorAggregate = buildAggregateWatchProgress(rowsBeforeUpdate, requiredAssetIds);
+    const wasLessonComplete = priorAggregate?.isComplete ?? false;
+
+    await upsertLessonVideoProgress({
+      lessonId,
+      profileId,
+      assetId: beat.assetId,
+      durationSeconds: beat.durationSeconds,
+      watchedSeconds,
+      furthestSeconds,
+      lastPositionSeconds: reachedEnd ? beat.durationSeconds : positionSeconds,
+      isComplete: assetComplete,
+      completedAt: assetComplete ? new Date().toISOString() : null
+    });
+
+    const allRows = await getLessonVideoProgressForLesson(lessonId, profileId);
+    const aggregate = buildAggregateWatchProgress(allRows, requiredAssetIds);
+    const didJustComplete = (aggregate?.isComplete ?? false) && !wasLessonComplete;
+
+    if (didJustComplete) {
+      await upsertLessonCompletion({
+        lessonId,
+        profileId,
+        isComplete: true
+      });
+      await emitCourseWebhookEvent(lesson.courseId, 'lesson.completion.updated', {
+        lessonId,
+        profileId,
+        isComplete: true
+      });
+      captureLessonCompleted(lesson.courseId, lessonId, profileId, 'video_watch');
+    }
+
+    if (!aggregate) {
+      throw new AppError('Failed to aggregate lesson watch progress', ErrorCodes.INTERNAL_ERROR, 500);
+    }
+
+    return {
+      ...aggregate,
+      didJustComplete
+    };
+  } catch (error) {
+    if (error instanceof AppError) {
+      throw error;
+    }
+
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to update lesson watch progress',
+      ErrorCodes.INTERNAL_ERROR,
+      500
+    );
+  }
+}

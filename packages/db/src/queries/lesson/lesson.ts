@@ -1,0 +1,539 @@
+import * as schema from '@db/schema';
+
+import type {
+  TLesson,
+  TLessonComment,
+  TLessonCompletion,
+  TLessonLanguage,
+  TNewLesson,
+  TNewLessonComment,
+  TNewLessonCompletion,
+  TNewLessonLanguage
+} from '@db/types';
+import { and, asc, count, db, desc, eq, inArray, lt, ne, sql } from '@db/drizzle';
+
+import type { DbOrTxClient } from '@db/drizzle';
+import { softDeleteBlocksWithoutPlacements } from '@db/queries/block/block';
+import { withDerivedLessonContent } from '@db/queries/block/legacy';
+import { createLessonLanguage, listLessonLanguagesForLessons } from '@db/queries/lesson/language';
+import { contentWriteBumpsTimestamp } from '@db/queries/course/content-timestamp';
+
+// Lesson Queries
+export async function getLessonsByCourseId(courseId: string, dbClient: DbOrTxClient = db) {
+  try {
+    const lessons = await dbClient.select().from(schema.lesson).where(eq(schema.lesson.courseId, courseId));
+
+    return await withDerivedLessonContent(lessons, dbClient);
+  } catch (error) {
+    console.error('getLessonsByCourseId error:', error);
+    throw new Error(
+      `Failed to get lessons by course ID "${courseId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function getPaginatedLessonsByCourseId(
+  courseId: string,
+  options: { sectionId?: string; page: number; limit: number }
+): Promise<{ items: TLesson[]; total: number }> {
+  try {
+    const { sectionId, page, limit } = options;
+    const where = and(
+      eq(schema.lesson.courseId, courseId),
+      sectionId ? eq(schema.lesson.sectionId, sectionId) : undefined
+    );
+
+    const [countRows, items] = await Promise.all([
+      db.select({ total: count() }).from(schema.lesson).where(where),
+      // A lesson in a section sorts at its section's top-level position, then by its order in the section.
+      db
+        .select({ lesson: schema.lesson })
+        .from(schema.lesson)
+        .leftJoin(schema.courseSection, eq(schema.courseSection.id, schema.lesson.sectionId))
+        .where(where)
+        .orderBy(
+          asc(sql`coalesce(${schema.courseSection.order}, ${schema.lesson.order})`),
+          asc(schema.lesson.sectionId),
+          asc(schema.lesson.order),
+          asc(schema.lesson.id)
+        )
+        .limit(limit)
+        .offset((page - 1) * limit)
+    ]);
+
+    return { items: items.map((row) => row.lesson), total: Number(countRows[0]?.total ?? 0) };
+  } catch (error) {
+    console.error('getPaginatedLessonsByCourseId error:', error);
+    throw new Error(
+      `Failed to get paginated lessons for course "${courseId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function getLessonRowById(lessonId: string, dbClient: DbOrTxClient = db): Promise<TLesson | null> {
+  try {
+    const [lesson] = await dbClient.select().from(schema.lesson).where(eq(schema.lesson.id, lessonId)).limit(1);
+
+    return lesson ?? null;
+  } catch (error) {
+    console.error('getLessonRowById error:', error);
+    throw new Error(`Failed to get lesson "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+export interface LessonById extends TLesson {
+  lessonLanguages: TLessonLanguage[];
+}
+
+export async function getLessonById(lessonId: string): Promise<LessonById | null> {
+  try {
+    const lesson = await getLessonRowById(lessonId);
+    if (!lesson) return null;
+
+    const [withContent] = await withDerivedLessonContent([lesson]);
+
+    return withContent;
+  } catch (error) {
+    console.error('getLessonById error:', error);
+    throw new Error(
+      `Failed to get lesson by ID "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export interface LessonCommentsAvailability {
+  lessonId: string;
+  courseId: string;
+  organizationCommentsEnabled: boolean;
+  lessonCommentsEnabled: boolean;
+  courseCommentsEnabled: boolean;
+}
+
+type LessonCommentsAvailabilityRow = Omit<
+  LessonCommentsAvailability,
+  'courseCommentsEnabled' | 'organizationCommentsEnabled'
+> & {
+  courseMetadata: typeof schema.course.$inferSelect.metadata;
+  organizationCustomization: typeof schema.organization.$inferSelect.customization | null;
+};
+
+function mapLessonCommentsAvailability(row: LessonCommentsAvailabilityRow): LessonCommentsAvailability {
+  return {
+    lessonId: row.lessonId,
+    courseId: row.courseId,
+    organizationCommentsEnabled: row.organizationCustomization?.apps?.comments === true,
+    lessonCommentsEnabled: row.lessonCommentsEnabled,
+    courseCommentsEnabled: row.courseMetadata.commentsEnabled ?? true
+  };
+}
+
+export async function getLessonCommentsAvailability(lessonId: string): Promise<LessonCommentsAvailability | null> {
+  try {
+    const [row] = await db
+      .select({
+        lessonId: schema.lesson.id,
+        courseId: schema.lesson.courseId,
+        organizationCustomization: schema.organization.customization,
+        lessonCommentsEnabled: schema.lesson.commentsEnabled,
+        courseMetadata: schema.course.metadata
+      })
+      .from(schema.lesson)
+      .innerJoin(schema.course, eq(schema.lesson.courseId, schema.course.id))
+      .innerJoin(schema.group, eq(schema.course.groupId, schema.group.id))
+      .innerJoin(schema.organization, eq(schema.group.organizationId, schema.organization.id))
+      .where(eq(schema.lesson.id, lessonId))
+      .limit(1);
+
+    return row ? mapLessonCommentsAvailability(row) : null;
+  } catch (error) {
+    console.error('getLessonCommentsAvailability error:', error);
+    throw new Error(
+      `Failed to get lesson comments availability for lesson "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function getLessonCommentsAvailabilityByCommentId(
+  commentId: number
+): Promise<LessonCommentsAvailability | null> {
+  try {
+    const [row] = await db
+      .select({
+        lessonId: schema.lesson.id,
+        courseId: schema.lesson.courseId,
+        organizationCustomization: schema.organization.customization,
+        lessonCommentsEnabled: schema.lesson.commentsEnabled,
+        courseMetadata: schema.course.metadata
+      })
+      .from(schema.lessonComment)
+      .innerJoin(schema.lesson, eq(schema.lessonComment.lessonId, schema.lesson.id))
+      .innerJoin(schema.course, eq(schema.lesson.courseId, schema.course.id))
+      .innerJoin(schema.group, eq(schema.course.groupId, schema.group.id))
+      .innerJoin(schema.organization, eq(schema.group.organizationId, schema.organization.id))
+      .where(eq(schema.lessonComment.id, commentId))
+      .limit(1);
+
+    return row ? mapLessonCommentsAvailability(row) : null;
+  } catch (error) {
+    console.error('getLessonCommentsAvailabilityByCommentId error:', error);
+    throw new Error(
+      `Failed to get lesson comments availability for comment "${commentId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export interface LessonNavInfo {
+  id: string;
+  courseId: string;
+  lessonTitle: string;
+  courseTitle: string;
+}
+
+/**
+ * Resolve navigation context (`/courses/{courseId}/lessons/{id}` + titles) for
+ * a set of lesson ids in one query. Used to turn raw lesson ids into clickable
+ * "go to lesson" links. Lessons in soft-deleted courses (`status = 'DELETED'`)
+ * are excluded so callers don't link into a course that no longer exists.
+ */
+export async function getLessonNavInfoByIds(lessonIds: string[]): Promise<LessonNavInfo[]> {
+  if (lessonIds.length === 0) return [];
+
+  try {
+    return await db
+      .select({
+        id: schema.lesson.id,
+        courseId: schema.lesson.courseId,
+        lessonTitle: schema.lesson.title,
+        courseTitle: schema.course.title
+      })
+      .from(schema.lesson)
+      .innerJoin(schema.course, eq(schema.course.id, schema.lesson.courseId))
+      .where(and(inArray(schema.lesson.id, lessonIds), ne(schema.course.status, 'DELETED')));
+  } catch (error) {
+    console.error('getLessonNavInfoByIds error:', error);
+    throw new Error(`Failed to get lesson nav info: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+export async function createLessons(values: TNewLesson[], dbClient: DbOrTxClient = db) {
+  try {
+    return await dbClient.insert(schema.lesson).values(values).returning();
+  } catch (error) {
+    console.error('createLessons error:', error);
+    throw new Error(`Failed to create lessons: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+export async function updateLesson(lessonId: string, data: Partial<TLesson>, dbClient: DbOrTxClient = db) {
+  try {
+    const fields = { ...data };
+    delete fields.updatedAt;
+    const fieldNames = Object.keys(fields);
+    const patch = contentWriteBumpsTimestamp(fieldNames) ? { ...fields, updatedAt: new Date().toISOString() } : fields;
+    const [updated] = await dbClient.update(schema.lesson).set(patch).where(eq(schema.lesson.id, lessonId)).returning();
+    return updated || null;
+  } catch (error) {
+    console.error('updateLesson error:', error);
+    throw new Error(
+      `Failed to update lesson "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function deleteLesson(lessonId: string, dbClient: DbOrTxClient = db) {
+  try {
+    const placed = await dbClient
+      .select({ blockId: schema.blockPlacement.blockId })
+      .from(schema.blockPlacement)
+      .where(eq(schema.blockPlacement.lessonId, lessonId));
+    const [deleted] = await dbClient.delete(schema.lesson).where(eq(schema.lesson.id, lessonId)).returning();
+    if (deleted) {
+      await softDeleteBlocksWithoutPlacements(
+        placed.map((row) => row.blockId),
+        dbClient
+      );
+    }
+
+    return deleted || null;
+  } catch (error) {
+    console.error('deleteLesson error:', error);
+    throw new Error(
+      `Failed to delete lesson "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+// Lesson Comment Queries
+export async function getLessonCommentsByLessonId(lessonId: string) {
+  try {
+    const comments = await db
+      .select({
+        comment: schema.lessonComment,
+        groupmember: schema.groupmember,
+        profile: schema.profile
+      })
+      .from(schema.lessonComment)
+      .leftJoin(schema.groupmember, eq(schema.lessonComment.groupmemberId, schema.groupmember.id))
+      .leftJoin(schema.profile, eq(schema.groupmember.profileId, schema.profile.id))
+      .where(eq(schema.lessonComment.lessonId, lessonId))
+      .orderBy(desc(schema.lessonComment.createdAt));
+
+    return comments.map((row) => ({
+      ...row.comment,
+      groupmember: row.groupmember
+        ? {
+            id: row.groupmember.id
+          }
+        : null,
+      profile: row.profile
+        ? {
+            fullname: row.profile.fullname,
+            avatarUrl: row.profile.avatarUrl
+          }
+        : null
+    }));
+  } catch (error) {
+    console.error('getLessonCommentsByLessonId error:', error);
+    throw new Error(
+      `Failed to get lesson comments for lesson "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+// Date.parse rolls Feb 31 over to March; Postgres rejects it.
+function isRealTimestamp(value: string): boolean {
+  if (Number.isNaN(Date.parse(value))) return false;
+
+  const [year, month, day] = value.slice(0, 10).split('-').map(Number);
+  const date = new Date(Date.UTC(year, month - 1, day));
+  return date.getUTCMonth() === month - 1 && date.getUTCDate() === day;
+}
+
+// Cursor is `<createdAt>|<id>`; a bare id is the format dashboards loaded before this change still hold.
+function parseLessonCommentCursor(cursor?: string): { createdAt?: string; id: number } | undefined {
+  if (!cursor) return undefined;
+  if (/^\d+$/.test(cursor)) return { id: Number(cursor) };
+
+  const separatorIndex = cursor.lastIndexOf('|');
+  const createdAt = cursor.slice(0, separatorIndex);
+  const id = cursor.slice(separatorIndex + 1);
+  if (separatorIndex <= 0 || !/^\d+$/.test(id) || !isRealTimestamp(createdAt)) return undefined;
+
+  return { createdAt, id: Number(id) };
+}
+
+/**
+ * Gets paginated comments for a lesson with author profile
+ * @param lessonId Lesson ID
+ * @param options Pagination options (cursor, limit)
+ * @returns Object with comments array, total count, hasMore flag, and nextCursor
+ */
+export async function getLessonCommentsByLessonIdPaginated(
+  lessonId: string,
+  options: { cursor?: string; limit: number }
+): Promise<{
+  items: Array<
+    TLessonComment & {
+      groupmember: { id: string } | null;
+      profile: { fullname: string | null; avatarUrl: string | null } | null;
+    }
+  >;
+  totalCount: number;
+  hasMore: boolean;
+  nextCursor: string | null;
+}> {
+  try {
+    const { limit } = options;
+    const cursor = parseLessonCommentCursor(options.cursor);
+
+    // Build where conditions
+    const whereConditions = [eq(schema.lessonComment.lessonId, lessonId)];
+    if (cursor) {
+      whereConditions.push(
+        cursor.createdAt
+          ? sql`(${schema.lessonComment.createdAt}, ${schema.lessonComment.id}) < (${cursor.createdAt}::timestamptz, ${cursor.id}::bigint)`
+          : lt(schema.lessonComment.id, cursor.id)
+      );
+    }
+
+    // Get total count
+    const totalCountResult = await db
+      .select({ count: sql<number>`count(*)`.as('count') })
+      .from(schema.lessonComment)
+      .where(eq(schema.lessonComment.lessonId, lessonId));
+    const totalCount = Number(totalCountResult[0]?.count || 0);
+
+    // Fetch comments with author profile (limit + 1 to check if there are more)
+    const comments = await db
+      .select({
+        comment: schema.lessonComment,
+        groupmember: schema.groupmember,
+        profile: schema.profile
+      })
+      .from(schema.lessonComment)
+      .leftJoin(schema.groupmember, eq(schema.lessonComment.groupmemberId, schema.groupmember.id))
+      .leftJoin(schema.profile, eq(schema.groupmember.profileId, schema.profile.id))
+      .where(and(...whereConditions))
+      .orderBy(desc(schema.lessonComment.createdAt), desc(schema.lessonComment.id))
+      .limit(limit + 1);
+
+    // Check if there are more comments
+    const hasMore = comments.length > limit;
+    const items = comments.slice(0, limit);
+
+    // Get next cursor (oldest comment in this batch - for loading older comments)
+    const lastComment = items[items.length - 1]?.comment;
+    const nextCursor = hasMore && lastComment ? `${lastComment.createdAt}|${lastComment.id}` : null;
+
+    return {
+      items: items.map((row) => ({
+        ...row.comment,
+        groupmember: row.groupmember
+          ? {
+              id: row.groupmember.id
+            }
+          : null,
+        profile: row.profile
+          ? {
+              fullname: row.profile.fullname,
+              avatarUrl: row.profile.avatarUrl
+            }
+          : null
+      })),
+      totalCount,
+      hasMore,
+      nextCursor
+    };
+  } catch (error) {
+    console.error('getLessonCommentsByLessonIdPaginated error:', error);
+    throw new Error(
+      `Failed to get paginated lesson comments for lesson "${lessonId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function createLessonComment(data: TNewLessonComment): Promise<TLessonComment> {
+  try {
+    const [comment] = await db.insert(schema.lessonComment).values(data).returning();
+    if (!comment) {
+      throw new Error('Failed to create lesson comment');
+    }
+    return comment;
+  } catch (error) {
+    console.error('createLessonComment error:', error);
+    throw new Error(`Failed to create lesson comment: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+export async function getLessonCommentById(commentId: number): Promise<TLessonComment | null> {
+  try {
+    const [comment] = await db
+      .select()
+      .from(schema.lessonComment)
+      .where(eq(schema.lessonComment.id, commentId))
+      .limit(1);
+    return comment || null;
+  } catch (error) {
+    console.error('getLessonCommentById error:', error);
+    throw new Error(
+      `Failed to get lesson comment "${commentId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function updateLessonComment(commentId: number, comment: string): Promise<TLessonComment | null> {
+  try {
+    const [updated] = await db
+      .update(schema.lessonComment)
+      .set({ comment, updatedAt: new Date().toISOString() })
+      .where(eq(schema.lessonComment.id, commentId))
+      .returning();
+    return updated || null;
+  } catch (error) {
+    console.error('updateLessonComment error:', error);
+    throw new Error(
+      `Failed to update lesson comment "${commentId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function deleteLessonComment(commentId: number) {
+  try {
+    const [deleted] = await db.delete(schema.lessonComment).where(eq(schema.lessonComment.id, commentId)).returning();
+    return deleted || null;
+  } catch (error) {
+    console.error('deleteLessonComment error:', error);
+    throw new Error(
+      `Failed to delete lesson comment "${commentId}": ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+// Lesson Completion Queries
+export async function getLessonCompletion(lessonId: string, profileId: string): Promise<TLessonCompletion | null> {
+  try {
+    const [completion] = await db
+      .select()
+      .from(schema.lessonCompletion)
+      .where(and(eq(schema.lessonCompletion.lessonId, lessonId), eq(schema.lessonCompletion.profileId, profileId)))
+      .limit(1);
+    return completion || null;
+  } catch (error) {
+    console.error('getLessonCompletion error:', error);
+    throw new Error(`Failed to get lesson completion: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+export async function upsertLessonCompletion(data: TNewLessonCompletion): Promise<TLessonCompletion> {
+  try {
+    const [completion] = await db
+      .insert(schema.lessonCompletion)
+      .values(data)
+      .onConflictDoUpdate({
+        target: [schema.lessonCompletion.lessonId, schema.lessonCompletion.profileId],
+        set: {
+          isComplete: data.isComplete,
+          updatedAt: new Date().toISOString()
+        }
+      })
+      .returning();
+    if (!completion) {
+      throw new Error('Failed to upsert lesson completion');
+    }
+    return completion;
+  } catch (error) {
+    console.error('upsertLessonCompletion error:', error);
+    throw new Error(`Failed to upsert lesson completion: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}
+
+// Lesson Language Queries
+export async function getLessonLanguagesByLessonIds(lessonIds: string[], dbClient: DbOrTxClient = db) {
+  try {
+    return await listLessonLanguagesForLessons(lessonIds, dbClient);
+  } catch (error) {
+    console.error('getLessonLanguagesByLessonIds error:', error);
+    throw new Error(
+      `Failed to get lesson languages by lesson IDs: ${error instanceof Error ? error.message : 'Unknown error'}`
+    );
+  }
+}
+
+export async function createLessonLanguages(values: TNewLessonLanguage[], dbClient?: DbOrTxClient) {
+  if (values.length === 0) return [];
+  try {
+    const createAll = async (client: DbOrTxClient) => {
+      const created: Awaited<ReturnType<typeof createLessonLanguage>>[] = [];
+      for (const value of values) {
+        created.push(await createLessonLanguage(value, client));
+      }
+
+      return created;
+    };
+
+    return dbClient ? await createAll(dbClient) : await db.transaction(createAll);
+  } catch (error) {
+    console.error('createLessonLanguages error:', error);
+    throw new Error(`Failed to create lesson languages: ${error instanceof Error ? error.message : 'Unknown error'}`);
+  }
+}

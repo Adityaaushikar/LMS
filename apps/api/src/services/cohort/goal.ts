@@ -1,0 +1,647 @@
+import { AppError, ErrorCodes } from '@api/utils/errors';
+import { enqueueTransactionalEmail } from '@api/services/jobs';
+import { getDashboardBaseUrl } from '@cio/core/config/dashboard-url';
+import { buildEmailBranding, buildEmailFromName } from '@cio/email';
+import {
+  countAssignmentsByStatus,
+  countCohortGoals,
+  createCohortGoal,
+  deleteCohortGoal,
+  getAssignmentsForProfile,
+  getCoursesByCohort,
+  getLatestCompletionRecordsForProfilesAndCourses,
+  getMaxScoresForProfilesAndCourses,
+  getNonComplianceCourseCompletions,
+  getCohortById,
+  getCohortGoalAssignments,
+  getCohortGoalById,
+  getCohortGoals,
+  getCohortGoalsByOrg,
+  getCohortMembers,
+  listAllActiveCohortGoals,
+  listAssignmentsForReminderScan,
+  listOverdueAssignmentReminderContexts,
+  type CohortGoalReminderContext,
+  type CohortGoalReminderCursor,
+  type TNewCohortGoal,
+  type TNewCohortGoalAssignment,
+  type TCohortGoal,
+  type TCohortGoalAssignment,
+  type TCohortListPage,
+  updateCohortGoal as updateCohortGoalQuery,
+  upsertCohortGoalAssignments
+} from '@cio/db/queries/cohort';
+import { ROLE } from '@cio/utils/constants';
+import {
+  ZCreateCohortGoal,
+  type TCreateCohortGoal,
+  type TRemindOverdueCohortGoals,
+  type TUpdateCohortGoal
+} from '@cio/utils/validation/cohort';
+
+const AT_RISK_DAYS = 3;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+type GoalType = TCohortGoal['type'];
+
+/** Throws 400 unless every courseId is linked to the cohort. */
+async function assertCourseIdsBelongToCohort(cohortId: string, courseIds: string[]): Promise<void> {
+  const cohortCourses = await getCoursesByCohort(cohortId);
+  const cohortCourseIds = new Set(cohortCourses.map((row) => row.courseId));
+
+  const invalidCourseId = courseIds.find((courseId) => !cohortCourseIds.has(courseId));
+  if (invalidCourseId) {
+    throw new AppError(`Course "${invalidCourseId}" is not linked to this cohort`, ErrorCodes.VALIDATION_ERROR, 400);
+  }
+}
+
+// ─── CRUD ────────────────────────────────────────────────────────────────────
+
+export async function createGoal(cohortId: string, profileId: string, data: TCreateCohortGoal): Promise<TCohortGoal> {
+  const cohort = await getCohortById(cohortId);
+  if (!cohort) {
+    throw new AppError('Cohort not found', ErrorCodes.COHORT_NOT_FOUND, 404);
+  }
+
+  await assertCourseIdsBelongToCohort(cohortId, data.courseIds);
+
+  try {
+    const goal = await createCohortGoal({
+      cohortId,
+      title: data.title,
+      description: data.description ?? null,
+      type: data.type,
+      courseIds: data.courseIds,
+      requiredCount: data.requiredCount ?? null,
+      scoreThreshold: data.scoreThreshold ?? null,
+      teamPassRateThreshold: data.teamPassRateThreshold ?? null,
+      deadlineKind: data.deadlineKind,
+      deadlineDate: data.deadlineDate ?? null,
+      relativeDays: data.relativeDays ?? null,
+      recurringMonths: data.recurringMonths ?? null,
+      reminderDaysBefore: data.reminderDaysBefore,
+      createdByProfileId: profileId
+    });
+
+    await evaluateGoal(goal.id).catch((error) => {
+      console.error('createGoal: initial evaluation failed', error);
+    });
+
+    return goal;
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to create goal',
+      ErrorCodes.COHORT_GOAL_CREATE_FAILED,
+      500
+    );
+  }
+}
+
+async function withStatusCounts(
+  goals: TCohortGoal[]
+): Promise<Array<TCohortGoal & { statusCounts: Record<string, number> }>> {
+  if (goals.length === 0) return [];
+
+  const counts = await countAssignmentsByStatus(goals.map((goal) => goal.id));
+
+  return goals.map((goal) => ({
+    ...goal,
+    statusCounts: counts.get(goal.id) ?? {}
+  }));
+}
+
+export async function listGoals(
+  cohortId: string
+): Promise<Array<TCohortGoal & { statusCounts: Record<string, number> }>> {
+  const goals = await getCohortGoals(cohortId);
+
+  return withStatusCounts(goals);
+}
+
+export async function listGoalsPage(cohortId: string, page: TCohortListPage) {
+  const [goals, total] = await Promise.all([getCohortGoals(cohortId, { page }), countCohortGoals(cohortId)]);
+  const items = await withStatusCounts(goals);
+
+  return { items, total };
+}
+
+export async function getGoal(cohortId: string, goalId: string): Promise<TCohortGoal> {
+  const goal = await getCohortGoalById(goalId, cohortId);
+  if (!goal) {
+    throw new AppError('Goal not found', ErrorCodes.COHORT_GOAL_NOT_FOUND, 404);
+  }
+
+  return goal;
+}
+
+/** Throws 400 when the goal would break the create-time rules for its type and deadline. */
+function assertGoalDefinitionIsValid(goal: TCohortGoal) {
+  const deadlineDate = goal.deadlineDate ? new Date(goal.deadlineDate).toISOString() : goal.deadlineDate;
+  const revalidation = ZCreateCohortGoal.safeParse({
+    type: goal.type,
+    title: goal.title,
+    description: goal.description,
+    courseIds: goal.courseIds,
+    requiredCount: goal.requiredCount,
+    scoreThreshold: goal.scoreThreshold,
+    teamPassRateThreshold: goal.teamPassRateThreshold,
+    reminderDaysBefore: goal.reminderDaysBefore,
+    deadlineKind: goal.deadlineKind,
+    deadlineDate,
+    relativeDays: goal.relativeDays,
+    recurringMonths: goal.recurringMonths
+  });
+
+  if (!revalidation.success) {
+    throw new AppError(
+      revalidation.error.issues[0]?.message ?? 'Goal update would leave the goal in an invalid state',
+      ErrorCodes.VALIDATION_ERROR,
+      400
+    );
+  }
+}
+
+export async function updateGoal(cohortId: string, goalId: string, data: TUpdateCohortGoal): Promise<TCohortGoal> {
+  const existing = await getCohortGoalById(goalId, cohortId);
+  if (!existing) {
+    throw new AppError('Goal not found', ErrorCodes.COHORT_GOAL_NOT_FOUND, 404);
+  }
+
+  const existingCourseIds = new Set(existing.courseIds);
+  const addedCourseIds = (data.courseIds ?? []).filter((courseId) => !existingCourseIds.has(courseId));
+  if (addedCourseIds.length > 0) {
+    await assertCourseIdsBelongToCohort(cohortId, addedCourseIds);
+  }
+
+  const patch: Partial<TNewCohortGoal> = {};
+  if ('title' in data) patch.title = data.title;
+  if ('description' in data) patch.description = data.description ?? null;
+  if ('type' in data) patch.type = data.type;
+  if ('courseIds' in data) patch.courseIds = data.courseIds;
+  if ('requiredCount' in data) patch.requiredCount = data.requiredCount ?? null;
+  if ('scoreThreshold' in data) patch.scoreThreshold = data.scoreThreshold ?? null;
+  if ('teamPassRateThreshold' in data) patch.teamPassRateThreshold = data.teamPassRateThreshold ?? null;
+  if ('reminderDaysBefore' in data) patch.reminderDaysBefore = data.reminderDaysBefore;
+  if ('deadlineKind' in data) patch.deadlineKind = data.deadlineKind;
+  if ('deadlineDate' in data) patch.deadlineDate = data.deadlineDate ?? null;
+  if ('relativeDays' in data) patch.relativeDays = data.relativeDays ?? null;
+  if ('recurringMonths' in data) patch.recurringMonths = data.recurringMonths ?? null;
+  if ('status' in data) patch.status = data.status;
+
+  const changesDefinition = Object.keys(patch).some((field) => field !== 'status');
+  if (changesDefinition) {
+    assertGoalDefinitionIsValid({ ...existing, ...patch });
+  }
+
+  try {
+    const updated = await updateCohortGoalQuery(cohortId, goalId, patch);
+    if (!updated) {
+      throw new AppError('Goal not found', ErrorCodes.COHORT_GOAL_NOT_FOUND, 404);
+    }
+
+    await evaluateGoal(goalId).catch((error) => {
+      console.error('updateGoal: re-evaluation failed', error);
+    });
+
+    return updated;
+  } catch (error) {
+    if (error instanceof AppError) throw error;
+    throw new AppError(
+      error instanceof Error ? error.message : 'Failed to update goal',
+      ErrorCodes.COHORT_GOAL_UPDATE_FAILED,
+      500
+    );
+  }
+}
+
+export async function archiveGoal(cohortId: string, goalId: string): Promise<TCohortGoal> {
+  return updateGoal(cohortId, goalId, { status: 'archived' });
+}
+
+export async function removeGoal(cohortId: string, goalId: string): Promise<TCohortGoal> {
+  const deleted = await deleteCohortGoal(cohortId, goalId);
+  if (!deleted) {
+    throw new AppError('Goal not found', ErrorCodes.COHORT_GOAL_NOT_FOUND, 404);
+  }
+
+  return deleted;
+}
+
+// ─── Evaluator ───────────────────────────────────────────────────────────────
+
+/**
+ * Compute due date for one learner against a goal.
+ *
+ * - none / readiness → null
+ * - absolute → goal.deadlineDate
+ * - relative_to_join → joinedAt + relativeDays
+ * - recurring → goal.deadlineDate (current cycle); cycle advance handled elsewhere
+ */
+function computeDueDate(goal: TCohortGoal, joinedAt: Date): Date | null {
+  if (goal.deadlineKind === 'none') return null;
+  if (goal.deadlineKind === 'absolute') {
+    return goal.deadlineDate ? new Date(goal.deadlineDate) : null;
+  }
+
+  if (goal.deadlineKind === 'relative_to_join') {
+    if (!goal.relativeDays) return null;
+
+    return new Date(joinedAt.getTime() + goal.relativeDays * DAY_MS);
+  }
+
+  if (goal.deadlineKind === 'recurring') {
+    return goal.deadlineDate ? new Date(goal.deadlineDate) : null;
+  }
+
+  return null;
+}
+
+/**
+ * Decide a per-learner status from the cached counts and dates.
+ *
+ * Stays completed once it reaches `completed` (cron resets handle recurring).
+ */
+function decideStatus(args: {
+  completed: number;
+  required: number;
+  dueDate: Date | null;
+  now: Date;
+  previousStatus: TCohortGoalAssignment['status'] | null;
+}): { status: TCohortGoalAssignment['status']; completedAt: Date | null } {
+  const { completed, required, dueDate, now, previousStatus } = args;
+
+  if (previousStatus === 'waived') {
+    return { status: 'waived', completedAt: null };
+  }
+
+  if (required > 0 && completed >= required) {
+    return { status: 'completed', completedAt: now };
+  }
+
+  if (dueDate && now.getTime() > dueDate.getTime()) {
+    return { status: 'overdue', completedAt: null };
+  }
+
+  if (dueDate && dueDate.getTime() - now.getTime() < AT_RISK_DAYS * DAY_MS) {
+    return { status: 'at_risk', completedAt: null };
+  }
+
+  if (completed > 0) {
+    return { status: 'in_progress', completedAt: null };
+  }
+
+  return { status: 'not_started', completedAt: null };
+}
+
+/**
+ * Re-evaluate every assignment for one goal.
+ *
+ * Pulls all student cohort-members, computes a per-learner status, and upserts
+ * `program_goal_assignment`. Designed to be safe to run repeatedly (idempotent)
+ * and cheap enough for daily cron over hundreds of cohorts.
+ */
+export async function evaluateGoal(goalId: string): Promise<{ evaluated: number }> {
+  const goal = await getCohortGoalById(goalId);
+
+  if (!goal || goal.status === 'archived') return { evaluated: 0 };
+
+  const members = await getCohortMembers(goal.cohortId);
+  const studentMembers = members.filter((member) => member.roleId === ROLE.STUDENT && member.profileId);
+  if (studentMembers.length === 0) return { evaluated: 0 };
+
+  const profileIds = studentMembers.map((member) => member.profileId!);
+  const courseIds = goal.courseIds ?? [];
+
+  const [completionRecords, nonComplianceCompletions, scoreMap, existingAssignments] = await Promise.all([
+    getLatestCompletionRecordsForProfilesAndCourses(profileIds, courseIds),
+    getNonComplianceCourseCompletions(profileIds, courseIds),
+    goal.type === 'score' || goal.type === 'pass_rate'
+      ? getMaxScoresForProfilesAndCourses(profileIds, courseIds)
+      : Promise.resolve(new Map<string, number>()),
+    getCohortGoalAssignments(goalId)
+  ]);
+
+  const completionByKey = new Map<string, { status: string; score: number | null }>();
+  for (const record of completionRecords) {
+    completionByKey.set(`${record.profileId}:${record.courseId}`, {
+      status: record.status,
+      score: record.score
+    });
+  }
+
+  const previousByMember = new Map(existingAssignments.map((assignment) => [assignment.cohortMemberId, assignment]));
+
+  const now = new Date();
+  const requiredFor = (type: GoalType, total: number) =>
+    type === 'n_of_m' && goal.requiredCount ? Math.min(goal.requiredCount, total) : total;
+
+  const rows: TNewCohortGoalAssignment[] = [];
+
+  for (const member of studentMembers) {
+    if (!member.profileId) continue;
+
+    const joinedAt = member.createdAt ? new Date(member.createdAt) : now;
+    const dueDate = computeDueDate(goal, joinedAt);
+
+    const completedCourseIds = courseIds.filter((courseId) => {
+      const key = `${member.profileId}:${courseId}`;
+      const record = completionByKey.get(key);
+
+      if (record) {
+        if (goal.type === 'score' || goal.type === 'pass_rate') {
+          const score = scoreMap.get(key);
+          return typeof score === 'number' && score >= (goal.scoreThreshold ?? 100);
+        }
+        if (record.status === 'compliant') return true;
+      }
+
+      // Fallback: non-compliance course where every lesson is completed.
+      if (goal.type !== 'score' && goal.type !== 'pass_rate') {
+        return nonComplianceCompletions.has(key);
+      }
+
+      return false;
+    });
+
+    const completed = completedCourseIds.length;
+    const required = requiredFor(goal.type, courseIds.length);
+
+    const previous = previousByMember.get(member.id);
+    const decision = decideStatus({
+      completed,
+      required,
+      dueDate,
+      now,
+      previousStatus: previous?.status ?? null
+    });
+
+    rows.push({
+      goalId,
+      cohortMemberId: member.id,
+      dueDate: dueDate ? dueDate.toISOString() : null,
+      status: decision.status,
+      completedCount: completed,
+      requiredCount: required,
+      completedAt:
+        decision.status === 'completed' ? (previous?.completedAt ?? decision.completedAt?.toISOString() ?? null) : null,
+      lastEvaluatedAt: now.toISOString()
+    });
+  }
+
+  await upsertCohortGoalAssignments(rows);
+
+  return { evaluated: rows.length };
+}
+
+/**
+ * Re-evaluate every active goal in a cohort. Used after material cohort
+ * changes (member added, course added) or by cron sweeps.
+ */
+export async function evaluateCohortGoals(cohortId: string): Promise<{ evaluated: number }> {
+  const goals = await getCohortGoals(cohortId);
+  let evaluated = 0;
+  for (const goal of goals) {
+    const result = await evaluateGoal(goal.id);
+    evaluated += result.evaluated;
+  }
+
+  return { evaluated };
+}
+
+/**
+ * Re-evaluate all goals in an organization. Used by the daily cron.
+ */
+export async function evaluateOrgGoals(organizationId: string): Promise<{ evaluated: number; goals: number }> {
+  const goals = await getCohortGoalsByOrg(organizationId);
+  let evaluated = 0;
+  for (const goal of goals) {
+    const result = await evaluateGoal(goal.id);
+    evaluated += result.evaluated;
+  }
+
+  return { evaluated, goals: goals.length };
+}
+
+/**
+ * Re-evaluate every active goal across every org. Designed for the daily cron
+ * sweep — same shape as `runComplianceExpiryCheck` for the compliance feature.
+ */
+export async function runCohortGoalEvaluationSweep(): Promise<{
+  goalsEvaluated: number;
+  assignmentsEvaluated: number;
+}> {
+  const goals = await listAllActiveCohortGoals();
+  let assignmentsEvaluated = 0;
+
+  for (const goal of goals) {
+    try {
+      const result = await evaluateGoal(goal.id);
+      assignmentsEvaluated += result.evaluated;
+    } catch (error) {
+      console.error(`runCohortGoalEvaluationSweep: failed to evaluate goal ${goal.id}`, error);
+    }
+  }
+
+  return { goalsEvaluated: goals.length, assignmentsEvaluated };
+}
+
+// ─── Reminder scan ───────────────────────────────────────────────────────────
+
+function getWholeDaysUntil(now: Date, target: Date): number {
+  const ms = target.getTime() - now.getTime();
+  return Math.ceil(ms / DAY_MS);
+}
+
+function dayKey(now: Date): string {
+  return now.toISOString().slice(0, 10);
+}
+
+/**
+ * Queues one org-branded reminder email. False when nothing was queued: the learner opted out or email is unavailable.
+ */
+async function enqueueCohortGoalReminder(
+  context: CohortGoalReminderContext,
+  options: { email: string; daysUntilDue: number; idempotencyKey: string }
+): Promise<boolean> {
+  const baseUrl = getDashboardBaseUrl({
+    siteName: context.organizationSiteName,
+    customDomain: context.organizationCustomDomain,
+    isCustomDomainVerified: context.organizationIsCustomDomainVerified
+  });
+  const branding = buildEmailBranding({
+    name: context.organizationName,
+    avatarUrl: context.organizationAvatarUrl,
+    theme: context.organizationTheme
+  });
+  const from = buildEmailFromName(`${context.organizationName} (via ClassroomIO.com)`);
+
+  const result = await enqueueTransactionalEmail('cohortGoalReminder', {
+    to: options.email,
+    from,
+    fields: {
+      orgName: context.organizationName,
+      cohortName: context.cohortName,
+      goalTitle: context.goal.title,
+      daysUntilDue: options.daysUntilDue,
+      completedCount: context.assignment.completedCount ?? 0,
+      requiredCount: context.assignment.requiredCount ?? 0,
+      loginUrl: `${baseUrl}/lms/cohorts/${context.cohortId}`,
+      branding
+    },
+    idempotencyKey: options.idempotencyKey,
+    preference: { organizationId: context.organizationId, recipientProfileId: context.profileId }
+  });
+
+  return result.jobIds.length > 0;
+}
+
+/**
+ * Scan all active goal assignments and send a reminder email when
+ * `daysUntilDue` matches an entry in the goal's `reminderDaysBefore` cadence
+ * (mirrors `runComplianceReminderScan`).
+ *
+ * Idempotency: the email worker idempotency key is keyed on assignment id +
+ * the day bucket so a second run on the same day does not re-send.
+ */
+export async function runCohortGoalReminderScan(): Promise<{
+  scanned: number;
+  remindersEnqueued: number;
+}> {
+  const now = new Date();
+  const contexts = await listAssignmentsForReminderScan();
+  let remindersEnqueued = 0;
+
+  for (const context of contexts) {
+    if (!context.assignment.dueDate || !context.email) continue;
+
+    const dueDate = new Date(context.assignment.dueDate);
+    if (Number.isNaN(dueDate.getTime())) continue;
+
+    const daysUntilDue = getWholeDaysUntil(now, dueDate);
+    const reminderDays = context.goal.reminderDaysBefore ?? [];
+    const matchesReminder = (daysUntilDue > 0 && reminderDays.includes(daysUntilDue)) || daysUntilDue === 0;
+    if (!matchesReminder) continue;
+
+    try {
+      const idempotencyKey = `cohort-goal-reminder:${context.assignment.id}:${daysUntilDue}:${dayKey(now)}`;
+      const enqueued = await enqueueCohortGoalReminder(context, { email: context.email, daysUntilDue, idempotencyKey });
+      if (enqueued) remindersEnqueued += 1;
+    } catch (error) {
+      console.error(`runCohortGoalReminderScan: enqueue failed for assignment ${context.assignment.id}`, error);
+    }
+  }
+
+  return { scanned: contexts.length, remindersEnqueued };
+}
+
+/**
+ * How many 500-assignment pages one manual send reads. Ten pages reach 5,000 learners in one request; a cohort
+ * larger than that reports `truncated` so the caller can narrow the filter.
+ */
+const MAX_MANUAL_REMINDER_PAGES = 10;
+
+/**
+ * Emails overdue students on the cohort's active goals now: everyone, one course's goals, or one student. Pages
+ * through the overdue assignments until they run out, so every learner is reached in one request. `truncated`
+ * reports that the page budget ran out with assignments still unread.
+ */
+export async function sendOverdueCohortGoalRemindersNow(
+  cohortId: string,
+  input: TRemindOverdueCohortGoals
+): Promise<{ enqueued: number; skipped: number; truncated: boolean }> {
+  const now = new Date();
+  const filters = { courseId: input.courseId, profileId: input.profileId };
+  let enqueued = 0;
+  let skipped = 0;
+  let cursor: CohortGoalReminderCursor | undefined;
+  let truncated = false;
+
+  for (let page = 0; page < MAX_MANUAL_REMINDER_PAGES; page += 1) {
+    const result = await listOverdueAssignmentReminderContexts(cohortId, filters, cursor);
+
+    for (const context of result.contexts) {
+      if (!context.email || !context.assignment.dueDate) {
+        skipped += 1;
+        continue;
+      }
+
+      const daysUntilDue = getWholeDaysUntil(now, new Date(context.assignment.dueDate));
+      const idempotencyKey = `cohort-goal-reminder-manual:${context.assignment.id}:${dayKey(now)}`;
+      let queued = false;
+
+      try {
+        queued = await enqueueCohortGoalReminder(context, { email: context.email, daysUntilDue, idempotencyKey });
+      } catch (error) {
+        console.error(
+          `sendOverdueCohortGoalRemindersNow: enqueue failed for assignment ${context.assignment.id}`,
+          error
+        );
+      }
+
+      if (queued) {
+        enqueued += 1;
+        continue;
+      }
+
+      skipped += 1;
+    }
+
+    if (!result.nextCursor) break;
+
+    cursor = result.nextCursor;
+    truncated = page === MAX_MANUAL_REMINDER_PAGES - 1;
+  }
+
+  return { enqueued, skipped, truncated };
+}
+
+// ─── LMS read ────────────────────────────────────────────────────────────────
+
+export async function getMyGoals(profileId: string) {
+  return getAssignmentsForProfile(profileId);
+}
+
+// ─── Org-wide overview ───────────────────────────────────────────────────────
+
+/**
+ * Cross-cohort goal roll-up for the org owner. Lists every active goal in the
+ * org with its per-status counts so the dashboard can group by cohort.
+ */
+export async function getOrgGoalsOverview(organizationId: string) {
+  const goals = await getCohortGoalsByOrg(organizationId);
+  if (goals.length === 0) {
+    return { goals: [] };
+  }
+
+  const counts = await countAssignmentsByStatus(goals.map((goal) => goal.id));
+
+  return {
+    goals: goals.map((goal) => {
+      const statusCounts = counts.get(goal.id) ?? {};
+      const total = Object.values(statusCounts).reduce((sum, value) => sum + (value ?? 0), 0);
+      const completed = statusCounts.completed ?? 0;
+      const overdue = statusCounts.overdue ?? 0;
+      const atRisk = statusCounts.at_risk ?? 0;
+      const onTrack = total - overdue - atRisk;
+      const onTrackPct = total === 0 ? 0 : Math.round((onTrack / total) * 100);
+
+      return {
+        goalId: goal.id,
+        cohortId: goal.cohortId,
+        cohortName: goal.cohortName,
+        title: goal.title,
+        type: goal.type,
+        deadlineKind: goal.deadlineKind,
+        totalLearners: total,
+        completedCount: completed,
+        inProgressCount: statusCounts.in_progress ?? 0,
+        atRiskCount: atRisk,
+        overdueCount: overdue,
+        notStartedCount: statusCounts.not_started ?? 0,
+        waivedCount: statusCounts.waived ?? 0,
+        onTrackPct
+      };
+    })
+  };
+}

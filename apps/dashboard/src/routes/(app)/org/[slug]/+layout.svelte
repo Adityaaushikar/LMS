@@ -1,0 +1,107 @@
+<script lang="ts">
+  import { page } from '$app/state';
+  import { goto } from '$app/navigation';
+  import { onMount } from 'svelte';
+  import { resolve } from '$app/paths';
+  import * as Sidebar from '@cio/ui/base/sidebar';
+  import { Skeleton } from '@cio/ui/base/skeleton';
+  import { currentOrg, isOrgPaymentPastDue } from '$lib/utils/store/org';
+  import { isOrgStudent } from '$lib/utils/store/app';
+  import { appInitApi } from '$features/app/init.svelte';
+  import { AppHeader, PaymentFailedBanner } from '$features/ui';
+  import { PUBLIC_IS_SELFHOSTED } from '$env/static/public';
+  import { isOrgChooserAvailable, ORG_CHOOSER_PATH } from '$features/app/utils/post-auth-destination';
+
+  import { OrgSidebar } from '$features/ui/sidebar/org-sidebar';
+  import SettingsSidebar from '$features/ui/sidebar/settings-sidebar.svelte';
+  import { AddOrgModal } from '$features/org';
+
+  let { data, children } = $props();
+  let paymentBannerHeight = $state(0);
+  const ACCOUNT_REFRESH_INTERVAL_MS = 5 * 60 * 1000;
+  const isSettingsRoute = $derived(/\/settings(?:\/|$)/.test(page.url.pathname));
+  const isCoursesList = $derived(/\/courses\/?$/.test(page.url.pathname));
+  const studentDestination = $derived(
+    isOrgChooserAvailable({ isCloud: PUBLIC_IS_SELFHOSTED !== 'true', isOrgSite: !!data.isOrgSite })
+      ? ORG_CHOOSER_PATH
+      : '/lms'
+  );
+
+  function redirect(siteName: string | null) {
+    if (!siteName) return;
+
+    const newUrl = page.url.pathname.replace('*', siteName);
+    goto(newUrl + page.url.search);
+  }
+
+  onMount(() => {
+    function refreshWhenVisible() {
+      if (document.visibilityState === 'visible') {
+        void appInitApi.refreshAccountData();
+      }
+    }
+
+    const refreshTimer = setInterval(refreshWhenVisible, ACCOUNT_REFRESH_INTERVAL_MS);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+
+    return () => {
+      clearInterval(refreshTimer);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  });
+
+  $effect(() => {
+    data.orgName === '*' && redirect($currentOrg.siteName);
+  });
+
+  $effect(() => {
+    // Students must not use the admin org dashboard on app.*.
+    // isStudentExperience is false on the app host in cloud mode even for students.
+    if (appInitApi.isInitializedAndReady && $isOrgStudent) {
+      goto(resolve(studentDestination, {}));
+    }
+  });
+</script>
+
+{#if PUBLIC_IS_SELFHOSTED !== 'true'}
+  <AddOrgModal />
+{/if}
+
+<PaymentFailedBanner bind:height={paymentBannerHeight} />
+
+<Sidebar.Provider
+  style={$isOrgPaymentPastDue
+    ? `--app-banner-height: ${paymentBannerHeight}px; padding-top: ${paymentBannerHeight}px;`
+    : ''}
+>
+  {#if isSettingsRoute}
+    <SettingsSidebar />
+  {:else}
+    <OrgSidebar />
+  {/if}
+
+  <Sidebar.Inset>
+    {#if isSettingsRoute}
+      <div class="flex h-10 items-center px-3 md:hidden">
+        <Sidebar.Trigger testId="settings-sidebar-trigger-mobile" />
+      </div>
+    {:else}
+      <AppHeader />
+    {/if}
+
+    <div
+      class={isCoursesList ? 'flex w-full flex-1 flex-col' : 'mx-auto flex w-full max-w-6xl flex-1 flex-col gap-4 px-4'}
+    >
+      {#if data.orgName === '*'}
+        <div class="grid auto-rows-min gap-4 md:grid-cols-3">
+          <Skeleton class="aspect-video rounded-xl" />
+          <Skeleton class="aspect-video rounded-xl" />
+          <Skeleton class="aspect-video rounded-xl" />
+        </div>
+        <Skeleton class="h-[50vh] w-full rounded-xl" />
+      {:else}
+        {@render children?.()}
+      {/if}
+    </div>
+  </Sidebar.Inset>
+</Sidebar.Provider>

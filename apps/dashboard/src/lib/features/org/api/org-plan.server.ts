@@ -1,0 +1,173 @@
+import type {
+  TCancelOrgPlan,
+  TCreateOrgPlan,
+  TEarlyAdopterSubscriptionEvent,
+  TMarkOrgPlanPastDue,
+  TUpdateOrgPlan
+} from '@cio/utils/validation/organization';
+
+import { classroomio, type InferResponseType } from '$lib/utils/services/api';
+import { getApiKeyHeaders, safeServerApi } from '$lib/utils/services/api/server';
+
+type CreateOrgPlanRequest = typeof classroomio.organization.plan.$post;
+type CreateOrgPlanSuccess = Extract<InferResponseType<CreateOrgPlanRequest>, { success: true }>;
+type ActivateOrgPlanRequest = typeof classroomio.organization.plan.activate.$post;
+type ActivateOrgPlanSuccess = Extract<InferResponseType<ActivateOrgPlanRequest>, { success: true }>;
+type UpdateOrgPlanRequest = typeof classroomio.organization.plan.$put;
+type UpdateOrgPlanSuccess = Extract<InferResponseType<UpdateOrgPlanRequest>, { success: true }>;
+type MarkOrgPlanPastDueRequest = (typeof classroomio.organization.plan)['past-due']['$post'];
+type MarkOrgPlanPastDueSuccess = Extract<InferResponseType<MarkOrgPlanPastDueRequest>, { success: true }>;
+type CancelOrgPlanRequest = typeof classroomio.organization.plan.cancel.$post;
+type CancelOrgPlanSuccess = Extract<InferResponseType<CancelOrgPlanRequest>, { success: true }>;
+type RecordEarlyAdopterEventRequest = (typeof classroomio.organization.plan)['early-adopter-event']['$post'];
+type RecordEarlyAdopterEventSuccess = Extract<InferResponseType<RecordEarlyAdopterEventRequest>, { success: true }>;
+
+/**
+ * Server-side API methods for organization plan operations
+ * These methods use API key authentication and should only be used in server-side files
+ * (+server.ts, +layout.server.ts) to prevent API keys from being exposed to the client.
+ */
+export class OrgPlanApiServer {
+  /**
+   * Creates a new organization plan (server-side)
+   * @param params Organization plan creation parameters
+   * @returns Response data or null on error
+   */
+  static async createOrgPlan(params: TCreateOrgPlan) {
+    const result = await safeServerApi<CreateOrgPlanSuccess>(() =>
+      classroomio.organization.plan.$post(
+        {
+          json: params
+        },
+        getApiKeyHeaders()
+      )
+    );
+
+    if (!result.ok) {
+      console.error('Error creating org plan (server):', result);
+      return null;
+    }
+
+    return result.body.data;
+  }
+
+  /**
+   * Activates an organization plan or creates it when no local plan exists yet.
+   * @param params Organization plan activation parameters
+   * @returns Response data or null on error
+   */
+  static async activateOrgPlan(params: TCreateOrgPlan) {
+    const result = await safeServerApi<ActivateOrgPlanSuccess>(() =>
+      classroomio.organization.plan.activate.$post(
+        {
+          json: params
+        },
+        getApiKeyHeaders()
+      )
+    );
+
+    if (!result.ok) {
+      console.error('Error activating org plan (server):', result);
+      return null;
+    }
+
+    return result.body.data;
+  }
+
+  /**
+   * Updates an organization plan (server-side)
+   * @param params Update parameters (subscriptionId, payload)
+   * @returns Response data or null on error
+   */
+  static async updateOrgPlan(params: TUpdateOrgPlan) {
+    const result = await safeServerApi<UpdateOrgPlanSuccess>(() =>
+      classroomio.organization.plan.$put(
+        {
+          json: params
+        },
+        getApiKeyHeaders()
+      )
+    );
+
+    if (!result.ok) {
+      console.error('Error updating org plan (server):', result);
+      return null;
+    }
+
+    return result.body.data;
+  }
+
+  /**
+   * Records a failed subscription payment (server-side)
+   * @param params Subscription ID and Polar payload
+   * @returns `recorded` with the plan, `not_found` when no plan has the subscription, or `failed` on any other error
+   */
+  static async markOrgPlanPastDue(params: TMarkOrgPlanPastDue) {
+    const result = await safeServerApi<MarkOrgPlanPastDueSuccess>(() =>
+      classroomio.organization.plan['past-due'].$post(
+        {
+          json: params
+        },
+        getApiKeyHeaders()
+      )
+    );
+
+    if (result.ok) {
+      return { status: 'recorded' as const, plan: result.body.data };
+    }
+
+    if (result.status === 404) {
+      return { status: 'not_found' as const };
+    }
+
+    console.error('Error recording failed payment (server):', result);
+
+    return { status: 'failed' as const };
+  }
+
+  /**
+   * Cancels an organization plan (server-side)
+   * @param params Cancel parameters (subscriptionId, payload)
+   * @returns Response data or null on error
+   */
+  static async cancelOrgPlan(params: TCancelOrgPlan) {
+    const result = await safeServerApi<CancelOrgPlanSuccess>(() =>
+      classroomio.organization.plan.cancel.$post(
+        {
+          json: params
+        },
+        getApiKeyHeaders()
+      )
+    );
+
+    if (!result.ok) {
+      console.error('Error canceling org plan (server):', result);
+      return null;
+    }
+
+    return result.body.data;
+  }
+
+  /**
+   * Records a Polar subscription event for a purchase made without an account (server-side)
+   * @param params Subscription event parameters
+   * @returns Response data or null on error
+   */
+  static async recordEarlyAdopterEvent(params: TEarlyAdopterSubscriptionEvent) {
+    const result = await safeServerApi<RecordEarlyAdopterEventSuccess>(() =>
+      classroomio.organization.plan['early-adopter-event'].$post(
+        {
+          json: params
+        },
+        getApiKeyHeaders()
+      )
+    );
+
+    if (!result.ok) {
+      console.error('Error recording early adopter event (server):', result);
+      return null;
+    }
+
+    return result.body.data;
+  }
+}

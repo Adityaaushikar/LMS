@@ -1,0 +1,883 @@
+# @cio/ui
+
+UI component library for ClassroomIO, built with Svelte 5 and Tailwind CSS.
+
+## Package Information
+
+- **Name**: `@cio/ui`
+- **Type**: Svelte component library
+- **Framework**: Svelte 5
+- **Styling**: Tailwind CSS with custom `ui` prefix
+
+## Folder Structure
+
+```
+packages/ui/
+├── src/
+│   ├── base/          # Components from shadcn-svelte
+│   ├── custom/        # Components from other sources or built on top of base components
+│   ├── hooks/         # Reusable Svelte hooks
+│   ├── tools/         # Utility functions (cn, sanitize, etc.)
+│   ├── index.css      # Global styles
+│   └── index.ts       # Main export file
+├── package.json
+├── components.json    # shadcn-svelte configuration
+└── jsrepo.json        # jsrepo configuration
+```
+
+## Storybook
+
+We maintain a Storybook instance at `packages/storybook` to make it easy to browse, visualize, and reuse every UI component in the app. Instead of digging through source code or guessing how a component looks, you can see each piece rendered in isolation with its variants, props, and states documented.
+
+This is especially useful when you're building a new feature and need to find the right existing component — check Storybook first before creating something from scratch.
+
+<img alt="Storybook Preview" src="https://brand.cdn.clsrio.com/storybook-preview.png" />
+
+To run it locally:
+
+```bash
+cd packages/storybook && pnpm dev
+```
+
+See `packages/storybook/README.md` for detailed instructions on creating stories and publishing.
+
+## Content Structure
+
+### Base Components (`src/base/`)
+
+All components in the `base` directory are primarily from [shadcn-svelte](https://www.shadcn-svelte.com/). These are the foundational UI components that follow the shadcn design system.
+
+**Guidelines:**
+
+- Any new component from shadcn-svelte should be added to the `base` directory
+- Components are organized in their own folders with an `index.ts` file for exports
+- Each component folder typically contains the main component file(s) and an `index.ts` export file
+
+**Examples:**
+
+- `base/button/` - Button component from shadcn-svelte
+- `base/dialog/` - Dialog component from shadcn-svelte (see [Dialog button hierarchy](#dialog-button-hierarchy) below)
+- `base/tooltip/` - Tooltip component from shadcn-svelte
+
+### Custom Components (`src/custom/`)
+
+Components in the `custom` directory come from various sources or are built on top of base components:
+
+1. **External Sources:**
+   - Components from [shadcn-svelte-extras](https://www.shadcn-svelte-extras.com/)
+   - Components from [Edra Editor](http://edra.tsuzat.com/) (rich text editor)
+   - Other third-party component libraries
+
+2. **Extended Components:**
+   - Any component that builds on top of shadcn-svelte base components
+   - Custom implementations that extend base component functionality
+
+**Examples:**
+
+- `custom/code/` - From shadcn-svelte-extras (syntax-highlighted code block with copy and overflow)
+- `custom/underline-tabs/` - From shadcn-svelte-extras
+- `custom/editor/` - Rich text editor based on Edra/Tiptap
+- `custom/image-cropper/` - Custom image cropping component
+- `custom/checkbox-field/` - Field component built on top of base Checkbox
+- `custom/newsfeed-reactions/` - Newsfeed reaction picker and summary used by course and program feeds
+- `custom/course-creator/` - ChatGPT-style course creation input with level and type selects
+- `custom/attention-highlight/` - Prop-driven focus pulse and smooth scroll wrapper to draw user attention to specific items
+- `custom/question-type-picker/` - Question type picker modal and QuestionTypeIcon glyph/icon component
+- `custom/org-landing-page/` - 11-theme org and course landing page system, including `LearnerMenu` authenticated popover
+- `custom/add-block/` - the add-content entry points for lessons (`Menu` between-block plus, `Row` empty-state/AI row, `Item` choice button)
+- `custom/block/` - lesson block container (ordering, gap menus, rail) and presentational blocks (image, document, slide, video, note)
+
+### Question type icon (`src/custom/question-type-picker/question-type-icon.svelte`)
+
+Renders a question type glyph tile or Lucide icon based on `key` (QuestionTypeKey) or `typeId` (number), matching the design system from the question type picker.
+
+| Prop        | Type                        | Default | Description                                          |
+| ----------- | --------------------------- | ------- | ---------------------------------------------------- |
+| `key`       | `QuestionTypeKey \| string` | `null`  | Question type key (e.g. `'RADIO'`, `'SHORT_ANSWER'`) |
+| `typeId`    | `number`                    | `null`  | Numeric question type ID                             |
+| `class`     | `string`                    | `''`    | Additional classes for the container tile            |
+| `iconClass` | `string`                    | `''`    | Additional classes for the inner Lucide icon         |
+
+```svelte
+<QuestionTypeIcon typeId={offender.typeId} />
+<QuestionTypeIcon key="SHORT_ANSWER" class="ui:size-8" />
+```
+
+### Attention highlight (`src/custom/attention-highlight/`)
+
+Wrapper component that highlights its content with an animated focus pulse ring and smooth scrolls into view when triggered.
+
+| Prop          | Type                    | Default     | Description                                                                     |
+| ------------- | ----------------------- | ----------- | ------------------------------------------------------------------------------- |
+| `highlight`   | `boolean`               | `false`     | When true, triggers the pulse animation and auto-scroll                         |
+| `trigger`     | `number`                | `0`         | Incremental counter to imperatively trigger the pulse animation and auto-scroll |
+| `duration`    | `number`                | `3`         | Duration of the pulse animation in seconds                                      |
+| `autoScroll`  | `boolean`               | `true`      | Whether to smoothly scroll the element into view on trigger                     |
+| `scrollBlock` | `ScrollLogicalPosition` | `'center'`  | Scroll alignment (`'center'`, `'start'`, `'nearest'`, `'end'`)                  |
+| `id`          | `string`                | `undefined` | Optional DOM element id                                                         |
+| `class`       | `string`                | `''`        | Additional CSS classes                                                          |
+| `onComplete`  | `() => void`            | `undefined` | Callback fired when the duration timer completes                                |
+
+```svelte
+<!-- Declarative (e.g. from URL / state) -->
+<AttentionHighlight highlight={isHighlighted} duration={3}>
+  <div class="rounded border p-4">Content to highlight</div>
+</AttentionHighlight>
+
+<!-- Imperative (e.g. from button click) -->
+<AttentionHighlight trigger={triggerCount} duration={3}>
+  <div class="rounded border p-4">Content to highlight</div>
+</AttentionHighlight>
+```
+
+### Brand wash (`src/custom/animation/brand-wash/`)
+
+Decorative background layer: a top-down gradient tinted from `--primary` with an optional faded dot grid. Because it reads `--primary`, it renders in ClassroomIO blue on the app and in the org's theme colour on org sites. Place it as the first child of a `relative` container; later siblings stack above it.
+
+| Prop    | Type      | Default     | Description                 |
+| ------- | --------- | ----------- | --------------------------- |
+| `dots`  | `boolean` | `true`      | Show the masked dot grid    |
+| `class` | `string`  | `undefined` | Additional classes on layer |
+
+```svelte
+<div class="relative">
+  <BrandWash />
+  <div class="relative">Content</div>
+</div>
+```
+
+### Block skyline (`src/custom/animation/block-skyline/`)
+
+Ambient brand animation: notch blocks drop in one at a time and stack. By default they clear together and repeat on a 10s loop; with `loop={false}` they drop in once and stay. Hidden from assistive tech and static under `prefers-reduced-motion`. Tones come from `--muted` and `--primary`. Use it for ClassroomIO-branded surfaces only, not org sites.
+
+| Prop     | Type      | Default     | Description                                                          |
+| -------- | --------- | ----------- | -------------------------------------------------------------------- |
+| `loop`   | `boolean` | `true`      | Clear and repeat every 10s; `false` drops in once and stays          |
+| `repeat` | `number`  | `1`         | Repeats the column pattern across the width (extra copies from `md`) |
+| `rows`   | `number`  | `3`         | Tallest stack; values above 3 add same-size blocks to every column   |
+| `class`  | `string`  | `undefined` | Width / placement                                                    |
+
+```svelte
+<BlockSkyline class="w-full max-w-[400px]" />
+
+<!-- Taller stacks -->
+<BlockSkyline rows={6} class="w-full" />
+
+<!-- Full-width page footer -->
+<BlockSkyline loop={false} repeat={3} class="absolute inset-x-0 bottom-0 px-4" />
+```
+
+### Notch cutout utility (`ui:notch-cutout`)
+
+Cuts the brand notch (a trapezoid with flared top corners and rounded bottom corners) out of an element's top edge with a CSS mask, so it reads correctly over gradients and images. Tune it with `--notch-x` (default `2.5rem`), `--notch-w` (`46px`) and `--notch-h` (`11px`). Masks clip `box-shadow`, so put shadows on a wrapper with `drop-shadow`.
+
+```svelte
+<div class="drop-shadow-md">
+  <Card.Root class="ui:notch-cutout">…</Card.Root>
+</div>
+```
+
+### Exercise question (`src/custom/exercise-question/`)
+
+Learner and author UIs for exercise questions (take, preview, review, submission, edit per question type).
+
+- **`renderers/shared/`** — Cross-type presentation pieces reused by multiple question families (for example `labeled-value-row.svelte`, `mcq-preview-option-row.svelte`, `submission-response-pie-chart.svelte`). Mode entry files stay thin; add new shared pieces here when two or more types need the same markup.
+- **`renderers/<question-type>/`** — One folder per type (`radio`, `numeric`, …) containing `take.svelte`, `preview.svelte`, and optional `review.svelte`, `submission.svelte`, `edit.svelte`, plus type-specific fragments (for example `numeric-expected-fields.svelte`, `ordering-display.svelte`).
+- **`renderers/option-image.svelte`**, **`renderers/submission-utils.ts`** — Existing shared helpers at the `renderers/` root; keep importing from there unless consolidating in a later pass.
+
+**Types with heavier or distinct UIs** (textarea editor, file upload, matching/hotspot authoring, link lists) intentionally keep separate `take` / `preview` implementations until a second consumer (for example a dedicated `review` mode) justifies extracting more shared fragments.
+
+### Image lightbox (`src/custom/image-lightbox/`)
+
+Full-screen image viewer for screenshots and other detailed images. `ZoomableImage` renders an image uncropped (`object-contain`) as a button with a hover "enlarge" hint. `ImageLightbox` opens one image or a gallery: click or `+`/`-` to zoom (up to 300%), arrow keys or the side buttons to move between images, Esc or a click on the backdrop to close. Both `open` and `index` are bindable. Copy is passed via `labels: ImageLightboxLabels` (`close`, `zoomIn`, `zoomOut`, `previous`, `next`). Exercise question and option images use both in every non-edit mode. See `Molecules/ImageLightbox` in Storybook.
+
+```svelte
+<ZoomableImage {src} {alt} enlargeLabel="Click to enlarge" onclick={() => (open = true)} />
+<ImageLightbox images={[{ src, alt }]} {labels} bind:open />
+```
+
+### Board frame (`src/custom/board-frame/`)
+
+`BoardFrame` wraps one image in the ClassroomIO browser board used for help screenshots: browser chrome with three dots and a URL pill, the paper-colored board, a shelf and two feet. It mirrors the geometry in `apps/help/scripts/frame-screenshot.mjs`, so a framed image looks the same whether it is composited at build time or loaded at runtime. Pass `src`, `alt`, and optionally `url` (the text in the address pill, truncated with an ellipsis). The frame scales with its container width, and the image keeps its aspect ratio uncropped. See `Molecules/BoardFrame` in Storybook.
+
+```svelte
+<BoardFrame src={coverUrl} alt={title} url="feedback.classroomio.com/updates" />
+```
+
+### Video guide (`src/custom/video-guide/`)
+
+Entry points for a short YouTube walkthrough of a feature. All three open the same dialog component, which plays the video from `youtube-nocookie.com` with autoplay. They take a YouTube `videoId` rather than a URL. Pass every label from the host app (`closeLabel` falls back to an untranslated "Close").
+
+- `VideoGuideCard`: a thumbnail card with a play button, optional `badgeLabel` and `actionLabel`, and a `description`. Use it in an empty state or under a setup guide. It is centred with `max-w-md`; pass `align="start"` to keep it at the start of its container.
+- `VideoGuideButton`: a button with a play icon and a `label`. Takes the `Button` `variant` (default `outline`) and `size`.
+- `VideoGuideDialog`: the dialog on its own, for a custom trigger. Bind `open`.
+
+`title` is the dialog title and the iframe title, and `closeLabel` is its close button. The card and the button own their dialog, and `open` is bindable on both. See `Molecules/VideoGuide` in Storybook.
+
+```svelte
+<VideoGuideCard
+  videoId="9hpGCqzypLk"
+  title={$t('video_guide.lesson_blocks.title')}
+  description={$t('video_guide.lesson_blocks.description')}
+  badgeLabel={$t('video_guide.new_badge')}
+  actionLabel={$t('video_guide.watch_video')}
+  closeLabel={$t('video_guide.close')}
+/>
+```
+
+### Coach mark (`src/custom/coach-mark/`)
+
+`CoachMark` is a small primary-colored tip with a pointer that sits under the control it introduces. Render it inside a `relative` wrapper around that control. It takes a `title`, an optional `description`, a `dismissLabel`, and an optional `actionLabel` with `onAction` and an `actionIcon` snippet. `align` (`end` by default, or `start`) picks which edge of the wrapper the tip and its pointer line up with; `class` and `arrowClass` override the position, for example at a breakpoint.
+
+Pass `storageKey` to show the tip once: it is stored in `localStorage` when the tip is dismissed, when its action runs, or when the tip is removed from the page, and the tip stays hidden afterwards. Without `storageKey` it shows on every mount. See `Molecules/CoachMark` in Storybook.
+
+```svelte
+<div class="relative">
+  <LessonModeToggle {mode} onToggle={toggleMode} />
+  <CoachMark
+    title={$t('video_guide.lesson_blocks.coach_title')}
+    description={$t('video_guide.lesson_blocks.coach_description')}
+    dismissLabel={$t('video_guide.dismiss')}
+    actionLabel={$t('video_guide.watch_video')}
+    storageKey="classroomio:lesson-blocks-coach-mark-seen"
+    onAction={() => (videoOpen = true)}
+  />
+</div>
+```
+
+### Changelog cover (`src/custom/changelog-cover/`)
+
+`ChangelogCover` is the fallback image for a changelog entry that has no cover. It draws a 1600×838 SVG in the brand style (sand background, the blue ClassroomIO mark and wordmark, a heavy Geist title with tight tracking, Geist Mono labels and a hairline) from `title`, with optional `label` (top right, default "Changelog") and `footer` (bottom left, for example a date). SVG text cannot wrap, so `layoutChangelogTitle` from `@cio/utils/functions/changelog-cover` wraps the title and steps the font size down for long ones, cutting a very long title with an ellipsis. The SVG fills its container (`preserveAspectRatio="xMidYMin slice"`, so a wide crop keeps the top row and trims from the bottom), so give the parent the aspect ratio. It inherits the page's Geist when loaded and falls back to system fonts otherwise. See `Molecules/ChangelogCover` in Storybook.
+
+```svelte
+<div class="aspect-video w-full overflow-hidden rounded-md border">
+  <ChangelogCover {title} footer="Oct 5, 2026" />
+</div>
+```
+
+### Question type picker (`src/custom/question-type-picker/`)
+
+Marketing / demo widget: left-hand list of question types and a live **take**-mode preview using `ExerciseQuestion.QuestionRenderer`. Copy is English-only (no dashboard i18n). Also consumed by the **`@cio/embeds`** app as a CDN bundle (`apps/embeds`).
+
+### Attachment list (`src/custom/attachment-list/`)
+
+Presentational list for lesson (or similar) file attachments with **view** and **edit** modes. View mode shows a header (paperclip + title + file count) and rows with view/download icon buttons. Edit mode shows sortable rows (when `onReorder` is provided) with a drag handle, view, and delete actions. Copy is passed via the `labels: AttachmentListLabels` prop (including `reorder` for the drag handle) so dashboard wrappers can supply translated strings. `AttachmentListFile.type` accepts a file extension or MIME type for icon styling. See `Molecules/AttachmentList` in Storybook.
+
+### Upload file card (`src/custom/upload-file-card/`)
+
+One compact row (about 52px) for a file that is uploading or has uploaded, meant to be stacked into an upload queue next to `FileDropZone`. A file-type badge (`PDF`, `CSV`, `XLSX`, `IPYNB`, `PY`, …) sits on the left, with the file name and a one-line status beside it. While the file is in flight the card fills with a gradient that sweeps to `progress` and a 2px bar tracks the same value along the bottom edge. `status` is `queued`, `uploading`, `done` or `error`: `queued` shows `labels.queued` until the queue starts the file, `uploading` shows the percentage, `done` fades the fill and shows a green check, and `error` shows `labels.failed` followed by `errorMessage` (or the file size when there is none), with a Retry button when `onRetry` is passed. `onRemove` renders an icon-only secondary button on every state except `done`, so a finished file is never deleted by accident. Copy is passed via `labels: UploadFileCardLabels`, including the `uploading(percent)` and `transferred(uploaded, total)` formatters, so the host supplies translated strings. `size` is in bytes and formatted with `formatSize` (default `formatFileSize`). `FileTypeBadge` is the primary-tinted tile with the file extension (`size="sm"` or `"md"`); use it on its own for file pickers such as the lesson document library. See `Molecules/UploadFileCard` in Storybook.
+
+```svelte
+<UploadFileCard
+  name={item.file.name}
+  size={item.file.size}
+  status={item.status}
+  progress={item.progress}
+  {labels}
+  onRemove={() => queue.remove(item.id)}
+  onRetry={() => queue.retry(item.id)}
+/>
+```
+
+### Slide embed (`src/custom/slide-embed/`)
+
+Guided picker, added-embed card, and 16:9 iframe for lesson slide decks. Copy is passed via `labels` so the dashboard can translate. The picker accepts a **full iframe** and offers a one-click switch when the pasted embed belongs to a different platform than the selected tab; pasted width/height are ignored and the frame always uses `aspect-video`. Platform marks use the official product logos (Google Slides, Canva, PowerPoint, Keynote, Figma, Prezi, Pitch, Gamma, SlideShare, Beautiful.ai). See `Molecules/SlideEmbed` in Storybook.
+
+### Lesson blocks (`src/custom/block/`, `add-block/`)
+
+The lesson block canvas is split into a reusable **container** and **block bodies**, so any host can render an ordered, draggable list of mixed content. Import via `import * as AddBlock from '@cio/ui/custom/add-block'` and `import * as Block from '@cio/ui/custom/block'` (legacy names such as `BlockList`, `ImageBlock`, `AddContentMenu` remain exported as aliases inside those namespaces).
+
+**Container**
+
+- `Block.List` hosts ordering (drag and drop via `svelte-dnd-action`), the gap `+` rows, the scroll rail and active-block tracking, the insert highlight, and the drag hint. It is generic over `T extends { id: string }` and takes `items`, `editable`, `spacingClass`, `addChoices`, `onAdd(type, index)`, `onReorder(items)`, and a `renderItem({ item, index, total, highlighted })` snippet. With no items it shows an `Empty` card illustrated with `MachineBlankLesson`; pass `emptyMachineHeading` with the translated label drawn on the machine (defaults to `LESSON`), or `emptyIcon` to show an icon instead. `emptyTitle` and `emptyDescription` show in both modes. Pass `emptyAction` for the editable empty state, and `showRail={false}` when the list is embedded in a narrow panel.
+- `Block.Shell` renders a single block's frame: optional drag handle, type label, example badge, actions dropdown (`menuItems`), and the `highlighted` ring.
+- `AddBlock.Menu` is the between-block `+` row that expands into a choices toolbar; the trigger stays hidden until the row is hovered or focused and animates a self-drawing stroke on hover (`PlusIcon` from `custom/moving-icons/`).
+- `AddBlock.Item` is one choice button: a label + optional trailing icon, with `compact`, `hideLabelOnMobile`, and `testId` props. `AddBlock.Menu` renders it compactly in the 10px gap row; `AddBlock.Row` renders it at 12px with the label hidden on mobile.
+- `AddBlock.Row` is the empty-state / toolbar row: Ask AI trigger, choice buttons, and the AI panel shell. `aiOpen` drives an animated clip-path reveal of the `aiPanel` snippet, keeps the toolbar `inert` while open, and restores focus to the trigger on close.
+
+Labels are individual props with English defaults, so the dashboard overrides them with translated copy. All blocks live in `src/custom/block/`:
+
+| Block                                         | Props worth knowing                                                                                                                                                               | Story                      |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- |
+| `Block.Image` (+ `Block.ImageSettingsDialog`) | `url`, `alt`, `fit`, `editable`, `changeLabel`, `onChange`, `onSaveSettings`                                                                                                      | `Blocks/ImageBlock`        |
+| `Block.Document`                              | `file`, `editable`, `labels` (`view`, `download`), `changeLabel`, `onView`, `onDownload`, `onChange` — one file per block, shown as a single card                                 | `Blocks/DocumentBlock`     |
+| `Block.Slide`                                 | `slide`, `isExample`, `editable`, `frameTitle`, `changeLabel`, `onChange`                                                                                                         | `Blocks/SlideBlock`        |
+| `Block.Video`                                 | `title`, `thumbnailUrl`, `fallbackThumbnailUrl`, `durationLabel`, `channelLine`, `metaLine`, `changeLabel`, `onChange`, plus `actions`, `status`, `notice`, and `player` snippets | `Blocks/VideoBlock`        |
+| `Block.Note`                                  | `editable`, `contentHtml`, `empty`, `emptyLabel`, plus `editor` and `view` snippets                                                                                               | `Blocks/NoteBlock`         |
+| `Block.ChangeButton`                          | `label`, `onclick`, `disabled` — the hover "Change …" action the source blocks overlay on their media                                                                             | `Blocks/BlockChangeButton` |
+
+`Block.Video` and `Block.Note` are presentational: the host injects its own player, editor, dropdown, and math-rendering wrapper through snippets, while the block owns layout, chrome, and the example states.
+
+### Reading density (`src/custom/density-control/`)
+
+`DensityControl` pairs a compact segmented toggle with a live gap swatch, mirroring the lesson-editor prototype: picking Compact / Comfortable / Spacious updates the swatch gaps (4 / 7 / 11px) with a short transition. It takes `value`, `options` (`{ value, label }[]`, labels injected by the host so copy stays translated), `onChange`, `groupLabel`, and an optional `testIdPrefix` for per-option hooks. See `Molecules/DensityControl` in Storybook.
+
+### Public course Copy Page (`src/custom/public-course/copy-page-button.svelte`)
+
+Split button used on public lesson pages when the course has Markdown export enabled. Primary action copies the lesson Markdown; the chevron menu offers View as Markdown, Open in ChatGPT, and Open in Claude. Both halves use `variant="secondary"`. Copy is passed via `labels: CopyPageLabels`. The host app supplies `markdownUrl` plus ChatGPT/Claude URLs (see `buildStudyChatUrl`) and snackbar callbacks. Render it through `PublicLessonView`'s `titleActions` snippet (its `content` snippet replaces the default video and body with host-rendered content, which the dashboard uses for lesson blocks) so it sits beside the lesson title at every breakpoint, with `ShareButton` to its right. The outline rail still has the matching copy / share / chat actions. See `Molecules/PublicCourse` → **Lesson · Copy Page split button** in Storybook.
+
+### Public course Share button (`src/custom/public-course/share-button.svelte`)
+
+Icon-only secondary share control for the public lesson/exercise title row. Opens the same Facebook / LinkedIn / X / Instagram menu as `OutlineRailActions`. Copy is passed via `labels: ShareActionLabels`. Instagram copies the page URL and the host shows a snackbar via `onInstagramCopied`. The outline rail keeps its own share row on `lg+`.
+
+### Public course outline rail actions (`src/custom/public-course/outline-rail-actions.svelte`)
+
+Muted icon+label links rendered **under** `PageOutline`, separated by a top border. Matches the docs-site pattern (copy, share, open in chat):
+
+- **Copy as Markdown** — same fetch as Copy Page; only when `markdownUrl` is set.
+- **Share on social media** — dropdown for Facebook, LinkedIn, and X (intent URLs). Instagram copies the page URL (there is no web share intent) and the host shows a snackbar via `onInstagramCopied`.
+- **Open in chat** — dropdown for ChatGPT and Claude when those URLs are passed.
+
+Pass copy via `labels: OutlineRailActionLabels`. Render through `PublicLessonView` / `PublicExerciseView`'s `outlineActions` snippet. Share-only is valid for exercises. See `Molecules/PublicCourse` → **Lesson · outline rail actions**.
+
+### Page outline (`src/custom/page-outline/`)
+
+Sticky in-page table of contents for long-form content (public lessons, exercises, docs). Pass `items: PageOutlineItem[]` (`id`, `title`, `level` 1–3). Clicking an item updates the URL hash, restores that hash on reload, and highlights the active heading via `IntersectionObserver`. Hierarchy is shown with indent (`h1` / `h2` / `h3`) along a dotted left rail; the active item uses the primary color.
+
+**Hidden on mobile by default.** `hideBelow` defaults to `lg` (`hidden` below that breakpoint). Pass `never` when the parent already hides the rail (for example `PublicLessonView`'s `aside`). Pin the rail to the **page** edge (a full-width flex sibling of the article column), not next to a centered content max-width. Put copy / share / chat links under the outline via `OutlineRailActions` (see **Public course outline rail actions**). Helpers: `injectHeadingIds(html, used?)` rewrites `h1`–`h3` with unique ids and returns outline entries (pass one shared `used` set when a page renders several HTML fragments, such as lesson blocks, so ids match the outline built from the joined body); `withPageTitle` prefixes the page title; `outlineFromSections` builds a title + subsection list. See `Molecules/PageOutline` in Storybook.
+
+### Comment tree (`src/custom/comment-tree/`)
+
+Presentational parts for an arbitrarily deep comment thread. All copy is passed in, so dashboard wrappers supply translated strings. See `Molecules/CommentTree` in Storybook.
+
+- `Root` / `Item` — layout wrappers.
+- `Node` — the recursive node. It renders one comment via the `body` snippet, then recurses over `node.children`. It imports its own file to recurse (`svelte:self` is deprecated in Svelte 5). Indent is applied as an inline `padding-left` from `indentStep` rather than a class, because a composed `ui:pl-*` string would never be emitted. At `indentCap` (default 5) indenting stops and `onContinueThread` is offered instead, so deep chains stay readable on narrow screens. Collapse state is not held by the node — pass `isCollapsed(id)` and `onToggleCollapse(id)` so it survives remounts and sibling appends.
+- `CollapseToggle` — the `[−]` / `[+]` control. Carries `aria-expanded` and `aria-controls` pointing at the children container.
+- `ThreadLine` — the vertical rail beside a nesting level; a real `<button>` so it is a keyboard-safe target, with `tabindex="-1"` to avoid a duplicate tab stop per level.
+- `MoreReplies` — one control for both "N more replies" (`kind="more"`) and "Continue this thread" (`kind="continue"`).
+- `Header` — avatar, name, optional `roleBadge`, date, and an edit/delete dropdown gated by `canEdit` / `canDelete`.
+- `Content` — sanitizes and renders comment HTML.
+- `Actions` — reply button plus an optional delete dropdown.
+- `Input` — the composer, with optional "replying to" chrome that is live UI state and never persisted.
+- `ReplyingTo` — the "↳ Replying to @X" line. Only for rows written before replies carried a real parent, where the visual parent is the thread root rather than the comment being answered.
+- `Replies` — superseded by `Node`; kept for compatibility and no longer used.
+
+### Live session card (`src/custom/live-session-card/`)
+
+Presentational card for a live-class lesson with three states (`live`, `upcoming`, `ended`) derived from `lessonAt` + `durationMinutes`, or forced via the `status` prop (used by Storybook). Shows a join/copy action set when live, an "Add to calendar" combo button (Google, Outlook.com, Office 365, Yahoo, plus an `.ics` download for Apple) and a countdown when upcoming. When ended, a "Watch recording" button opens `recordingUrl` if one is set. All copy is passed in via the `labels: LiveSessionLabels` prop, so the dashboard wrapper supplies translated strings; `onCopyLink` fires after the link is copied (e.g. for a snackbar). See `Molecules/LiveSessionCard` in Storybook.
+
+### Action popover (`src/custom/action-popover/`)
+
+Popover with a scrollable body, an optional search bar, and a pinned full-width action button in the footer. Import as `import { ActionPopover } from '@cio/ui/custom/action-popover'`. The default trigger is an outline icon `Button` with a plus icon; pass a `trigger` snippet (receives `{ props }` to spread on your own control) to replace it. Content is passed via the `children` snippet and scrolls at `max-h-64` (override with `bodyClass`). When `buttonText` is set, the footer renders below a border; clicking it awaits `onAction` (showing a spinner when it returns a Promise) and closes the popover unless `closeOnAction` is false. Omitting `buttonText` renders no footer. All copy comes from props, so dashboard wrappers supply translated strings.
+
+Passing `searchPlaceholder` renders a search input above the scrollable body — independent of `title`, so it works with or without a heading. The component does not filter content itself; bind `searchQuery` (cleared automatically when the popover closes) and filter your list in the consumer.
+
+| Prop                | Description                                                  |
+| ------------------- | ------------------------------------------------------------ |
+| `title`             | Optional heading rendered above the scrollable body          |
+| `buttonText`        | Footer button label; omit to render no footer                |
+| `onAction`          | Footer button handler; may return a Promise (shows loading)  |
+| `buttonDisabled`    | Disables the footer button                                   |
+| `buttonLoading`     | Forces the footer loading state                              |
+| `closeOnAction`     | Close the popover after the action resolves (default `true`) |
+| `align`             | Popover alignment (default `start`)                          |
+| `contentClass`      | Extra classes on `Popover.Content` (e.g. width)              |
+| `bodyClass`         | Extra classes on the padded body wrapper                     |
+| `searchPlaceholder` | Show a search bar when provided; used as its placeholder     |
+| `searchQuery`       | Bindable search query; cleared when the popover closes       |
+| `open`              | Bindable open state                                          |
+| `trigger`           | Optional snippet replacing the default plus-icon trigger     |
+| `children`          | Snippet with the popover body content                        |
+
+See `Molecules/ActionPopover` in Storybook.
+
+### Vimeo link form (`src/custom/vimeo-link-form/`)
+
+Form component for validating, normalizing, and attaching Vimeo video links (standard, channels, showcases, and unlisted URLs with privacy hashes). Displays domain-level privacy guidance with a one-click host copy button and a direct link to Vimeo's official domain privacy documentation.
+
+| Prop                  | Purpose                                                                                          |
+| --------------------- | ------------------------------------------------------------------------------------------------ |
+| `inputLabel`          | Text label for the link input                                                                    |
+| `inputPlaceholder`    | Placeholder text inside the input                                                                |
+| `addButtonLabel`      | Label for the submit button                                                                      |
+| `invalidVimeoMessage` | Error text displayed when the input contains invalid Vimeo links                                 |
+| `privacyHintPrefix`   | Optional leading text before the copyable domain badge                                           |
+| `privacyHintSuffix`   | Optional trailing text after the copyable domain badge                                           |
+| `disabled`            | Disables the input and submit button                                                             |
+| `onSubmit`            | Callback `(links: string[]) => Promise<void> \| void` invoked with deduplicated, canonical links |
+| `onInputChange`       | Optional callback when the raw input text changes                                                |
+
+See `Molecules/VimeoLinkForm` in Storybook.
+
+### Media player (`src/custom/media-player/`)
+
+Unified video player component supporting HTML5 video (direct MP4 and HLS via `hls.js`), YouTube embeds, and Vimeo videos via the official `@vimeo/player` SDK.
+
+**Features:**
+
+- **Native Vimeo SDK Integration**: Seamless playback with strict-origin referrer policy and unlisted privacy hash support (`?h=...`).
+- **Domain Privacy Error Recovery**: Automatically detects Vimeo `PrivacyError` events on domain-restricted videos, providing instructors with the exact host to whitelist and a live Retry button, while displaying a learner-friendly notice in learner mode.
+- **HLS Adaptive Streaming**: Plays master manifests through hls.js with automatic rendition selection. Segments are authorized by a short-lived signed cookie that the player renews before it expires, or by the viewer's session.
+- **YouTube Embeds**: Lightweight iframe embed with responsive aspect-ratio wrappers.
+
+| Option                    | Purpose                                                                                                                                                                                                                                                                                                                                                                         |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source`                  | `VideoSource` object (`type: 'upload' \| 'hls' \| 'youtube' \| 'vimeo' \| 'generic'`, `url`, `metadata`, `tracks`)                                                                                                                                                                                                                                                              |
+| `options.isLearnerView`   | When `true`, displays learner-friendly fallback messages instead of technical configuration hints                                                                                                                                                                                                                                                                               |
+| `options.onTimeUpdate`    | Callback invoked as playback position advances                                                                                                                                                                                                                                                                                                                                  |
+| `options.onPlayerReady`   | Callback invoked when the underlying player SDK is initialized                                                                                                                                                                                                                                                                                                                  |
+| `options.vimeoRetryLabel` | Optional label override for the Vimeo playback retry button                                                                                                                                                                                                                                                                                                                     |
+| `options.resumeAtSeconds` | Where a returning viewer left off, in seconds. Upload playback only: before the first play the player seeks there and, for HLS, loads one fragment so the frame and progress bar show the position. Ignored once playback has started                                                                                                                                           |
+| `options.onBeforeHlsLoad` | HLS only. Mints the playback cookie and returns `{ expiresInSeconds?, authExpired? }`. Called before the manifest loads, shortly before `expiresInSeconds` elapses, after a playlist or segment request is rejected as unauthorized, and on reload. If it throws, playback continues and the call is retried a few times. Return `authExpired: true` to show the sign-in prompt |
+
+### Combo button (`src/custom/combo-button/`)
+
+A split button: a labelled primary action joined to a chevron that opens a menu of alternatives. Import as `import { ComboButton, type ComboButtonItem } from '@cio/ui/custom/combo-button'`.
+
+Use it when there is a genuine default worth one click, and **label the primary half with the action it performs** — `Export as CSV`, not `Export`. An unlabelled primary silently picks one of the alternatives for the user. When no option dominates, use a plain `Button` with a `DropdownMenu` instead.
+
+Each item owns its own handler, so the component carries no behaviour: the consumer passes `onSelect` for the primary and one per item. Copy comes from props, so dashboard callers supply translated strings.
+
+| Prop        | Description                                                      |
+| ----------- | ---------------------------------------------------------------- |
+| `label`     | Primary button label; name the action, not a category            |
+| `onSelect`  | Primary button handler; may return a Promise                     |
+| `items`     | Menu entries (`ComboButtonItem[]`), each with its own `onSelect` |
+| `menuLabel` | Accessible name for the chevron, which has no visible text       |
+| `icon`      | Optional lucide icon for the primary half                        |
+| `variant`   | Button variant applied to both halves (default `outline`)        |
+| `size`      | `sm` \| `default` \| `lg` (default `sm`)                         |
+| `disabled`  | Disables both halves                                             |
+| `loading`   | Spinner on the primary half; also disables the menu              |
+| `align`     | Menu alignment (default `end`)                                   |
+| `testId`    | Primary `data-testid`; the chevron gets `${testId}-menu`         |
+
+`ComboButtonItem` takes `id`, `label`, and `onSelect`, plus optional `icon`, `description` (rendered muted beneath the label — use it to say _why_ an item is disabled rather than hiding it), `disabled` and `destructive`.
+
+See `Molecules/ComboButton` in Storybook.
+
+### Machines (`src/custom/animation/machines/`)
+
+Isometric line illustrations that show a mechanism instead of describing it: grey hairlines everywhere and one moving part in the accent colour. Seven machines, one per marketing section: `MachineTrainingLine` (hero), `MachineRepeater` (problem), `MachineSpectrum` (education), `MachineCertificatePress`, `MachineBrandStand`, `MachineEventWire` and `MachineGlassBox` (pillars 2 to 5). Two more illustrate product states: `MachineBrokenTrack` (a block tips over a gap it cannot cross, and a playable runner game) for error pages, and `MachineBlankLesson` (a blank lesson page whose title starts being written) for an empty lesson. The animation is SVG SMIL, so the drawings run without JavaScript. `MachineBrokenTrack` adds an optional game that does need JavaScript; without it the animation still plays. Under `prefers-reduced-motion` each machine freezes on the frame at `stillAt` seconds. Without a `label` the SVG is hidden from assistive tech; with one it is an `img`.
+
+The accent comes from `--primary` and the surface from `--muted`. Place a machine on a `--muted` card, or set `--machine-face` to the card colour so hidden lines stay hidden, and set `--machine-ink` to change the accent. Size it with the height or width you give it. Text inside the marketing drawings is placeholder copy (brand and domain names are placeholders). `MachineBrokenTrack` draws real UI strings, so pass translated labels. Use the marketing machines for ClassroomIO-branded surfaces only, not org sites. The two state machines carry no brand text and take the accent from `--primary`, so they are safe on org sites too. `MachineBlankLesson` draws a `LESSON` caption; pass `heading` with translated text.
+
+| Prop                   | Type                                 | Default                  | Description                                                                                                                                                                          |
+| ---------------------- | ------------------------------------ | ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `label`                | `string`                             | `undefined`              | Accessible description; omit to hide from assistive tech                                                                                                                             |
+| `stillAt`              | `number`                             | `6`                      | Second to freeze on under `prefers-reduced-motion`                                                                                                                                   |
+| `class`                | `string`                             | `undefined`              | Size and placement                                                                                                                                                                   |
+| `heading`              | `string`                             | `'LESSON'`               | Caption drawn on the page (`MachineBlankLesson` only)                                                                                                                                |
+| `playable`             | `boolean`                            | `true`                   | Show the play prompt and start the game on Space, ArrowUp or a tap (`MachineBrokenTrack` only)                                                                                       |
+| `startLabel`           | `string`                             | `'PRESS SPACE TO PLAY'`  | Blinking prompt before the game starts (`MachineBrokenTrack` only)                                                                                                                   |
+| `gameOverLabel`        | `string`                             | `'GAME OVER'`            | Shown after a crash (`MachineBrokenTrack` only)                                                                                                                                      |
+| `restartLabel`         | `string`                             | `'PRESS SPACE TO RETRY'` | Shown after a crash (`MachineBrokenTrack` only)                                                                                                                                      |
+| `scoreLabel`           | `string`                             | `'SCORE'`                | Label for the live score (`MachineBrokenTrack` only)                                                                                                                                 |
+| `bestLabel`            | `string`                             | `'BEST'`                 | Label for the best score (`MachineBrokenTrack` only)                                                                                                                                 |
+| `newRecordLabel`       | `string`                             | `'NEW RECORD!'`          | Shown when a run beats the best score (`MachineBrokenTrack` only)                                                                                                                    |
+| `enterFullscreenLabel` | `string`                             | `'Full screen'`          | Accessible name of the full-screen button (`MachineBrokenTrack` only)                                                                                                                |
+| `exitFullscreenLabel`  | `string`                             | `'Exit full screen'`     | Accessible name of the full-screen button while in full screen (`MachineBrokenTrack` only)                                                                                           |
+| `muteLabel`            | `string`                             | `'Mute sound'`           | Accessible name of the sound button while sound is on (`MachineBrokenTrack` only)                                                                                                    |
+| `unmuteLabel`          | `string`                             | `'Unmute sound'`         | Accessible name of the sound button while muted (`MachineBrokenTrack` only)                                                                                                          |
+| `onstatechange`        | `(snapshot: RunnerSnapshot) => void` | `undefined`              | Called when the game's state changes with `{ status, passed, isNewRecord }`; `status` is `'idle'`, `'extending'`, `'countdown'`, `'running'` or `'over'` (`MachineBrokenTrack` only) |
+
+```svelte
+<div class="bg-muted rounded-xl p-6">
+  <MachineTrainingLine label={$t('marketing.machines.training_line')} class="h-80" />
+</div>
+```
+
+Three machines show features that are not shipped yet: the training line and event wire show webhook deliveries, and the certificate press shows a public verification URL and expiry. The glass box shows a 69/mo tag by default; pass `price` (e.g. `price="35/mo"`) to show the real plan price.
+
+`MachineBrokenTrack` is also a small game in the style of the Chrome offline dinosaur. It shows a blinking "PRESS SPACE TO PLAY" prompt; on the first Space, ArrowUp or tap it loads the game code on demand (a dynamic import, so error pages that never play pay nothing), the board slowly extends, a 3-2-1 countdown runs, and obstacles rise out of the far end block for the block to jump. The score is the number of obstacles cleared. The best score is stored in localStorage under `cio-track-runner-best` and a new best shows a record line. Once the game starts, two icon buttons appear in a row above the board, right-aligned: mute and, where the browser supports it, full screen (it fullscreens the enclosing `Empty` card, not the whole page); the mute choice is stored under `cio-track-runner-muted`, and if storage is blocked nothing is remembered and nothing breaks. Sound effects (jump, point, countdown, crash and record) are synthesized with the Web Audio API and loaded on first use, so no audio files are fetched. The key listener is on `window`: while idle, Space and ArrowUp anywhere on the page (outside form controls, buttons and links) start the game and suppress scrolling, but only while the illustration is visible (it is hidden on phones and short viewports); during play they jump, and after a crash Space, ArrowUp or a tap restarts. Labels default to English, so pass translated strings, or pass `playable={false}` for the plain animation. `stillAt` applies to the idle animation only; once the game starts it is ignored, and under `prefers-reduced-motion` the game still runs but the board extension is skipped.
+
+`stillAt` defaults to `3.9` for `MachineBrokenTrack` and `3` for `MachineBlankLesson`, the frames where each drawing reads best.
+
+In an empty state, pass the machine through the `media` snippet of `Empty` (`@cio/ui/custom/empty`). With `media`, the `Empty` card grows to fit its content, and a `full-page` layout scrolls rather than clipping, leaving room for the logo when `showLogo` is set. The media is hidden on phones (below the `sm` breakpoint, or shorter than 640px), so the message and actions fit without scrolling and the game is not reachable on phones. Without `media`, the card keeps its 360px height cap. `Empty` takes three props for this: `size` (`'default'` or `'lg'`; `'lg'` makes a `page` card wider and taller), `mediaOnly` (hides the title, description and actions so the media fills the card, but only where the media is shown, so on phones and short viewports the message stays) and `overlay` (a snippet rendered over the card, which hides the card's own dashed border). `MachineRunnerBorder` is the overlay the game uses: pass it the `onstatechange` snapshot (`{ status, passed, isNewRecord }`) that `MachineBrokenTrack` emits. It redraws the dashed border as a progress meter: each obstacle cleared lights the next 1/30 of the border (a stretch of dashes) clockwise from the top-left in the accent colour, the lit dashes flow faster as the score rises, a full lap (30 obstacles) flashes the border and starts again, a crash turns the lit dashes red and scatters them, and a new record locks the whole border green with a glow. Reduced motion turns the animation off. Off a `--muted` card, set `--machine-face` to the page colour:
+
+```svelte
+<Empty title={...} description={...} variant="page" layout="full-page">
+  {#snippet media()}
+    <div class="mx-auto h-52 w-full max-w-[340px]" style:--machine-face="var(--background)">
+      <MachineBrokenTrack />
+    </div>
+  {/snippet}
+</Empty>
+```
+
+### Loaders (`src/custom/block/block-loader.svelte`, `src/custom/compact-loader/`)
+
+Branded loading states: lesson blocks drop in, stack and clear on a loop. Use `Block.Loader` for page-level waits (the root page, a course opening) and `CompactLoader` for small waits inside panels, tables, settings pages and modals. The blocks use the theme tokens (`--muted`, `--primary`, `--foreground`), cut the notch with `ui:notch-cutout`, and need no surface colour. Under `prefers-reduced-motion` the stack is shown without animation.
+
+`Block.Loader` ("BlockLoader"): four blocks share a left edge and stack with a 2px gap, each block's tab locking into the notch of the block under it.
+
+| Prop        | Type                 | Default     | Description                                                               |
+| ----------- | -------------------- | ----------- | ------------------------------------------------------------------------- |
+| `title`     | `string`             | `undefined` | Heading under the stack; also the accessible name when `label` is not set |
+| `caption`   | `string`             | `undefined` | Supporting line under the title                                           |
+| `label`     | `string`             | `undefined` | Accessible name when there is no `title`                                  |
+| `blocks`    | `BlockLoaderBlock[]` | 4 blocks    | `{ kind, title, tone: 'muted' \| 'tint' \| 'primary' \| 'dark', width }`  |
+| `blockText` | `boolean`            | `true`      | Show the kind and title inside each block; `false` gives plain blocks     |
+| `class`     | `string`             | `undefined` | Placement                                                                 |
+
+`CompactLoader`: three wordless blocks, so it works in any language.
+
+| Prop    | Type           | Default     | Description         |
+| ------- | -------------- | ----------- | ------------------- |
+| `size`  | `'sm' \| 'md'` | `'md'`      | `sm` is 60% of `md` |
+| `label` | `string`       | `undefined` | Accessible name     |
+| `class` | `string`       | `undefined` | Placement           |
+
+The default block labels in `Block.Loader` ("LESSON", "Getting started", ...) are illustrative English copy; pass `blocks` with translated text where that matters. Pass `title`, `caption` and `label` from the host (`$t(...)` in the dashboard).
+
+```svelte
+<Block.Loader title={$t('common.loading_states.opening_academy_title')} />
+<CompactLoader label={$t('common.loading')} />
+```
+
+### Number field (`src/custom/number-field/`)
+
+Number input that emits live only for valid in-range values and never rewrites text while typing. Use it for every numeric field instead of `Number(value)`.
+
+| User does                               | Text shown                                | Value emitted                       |
+| --------------------------------------- | ----------------------------------------- | ----------------------------------- |
+| types a valid in-range number           | as typed                                  | that number, on the keystroke       |
+| types an intermediate (`-`, `1.`, `1e`) | as typed                                  | nothing                             |
+| types out of range (`150` in 0–100)     | as typed                                  | nothing until blur                  |
+| blurs or presses Enter                  | normalized (`100`; `3` for `2.5` integer) | the normalized value, if it changed |
+| clears an optional field                | empty                                     | `null`, on the keystroke            |
+| clears a required field, then blurs     | the value it had when focused is restored | that value, if it changed           |
+| value changes from outside              | re-seeded                                 | —                                   |
+
+Pass `onCommit` for follow-up work that must run only on blur or Enter with the normalized value (for example re-clamping a dependent field). It fires after the value settles, even when the value itself did not change.
+
+```svelte
+<script lang="ts">
+  import { NumberField } from '@cio/ui/custom/number-field';
+
+  let points = $state<number | null>(1);
+</script>
+
+<NumberField label="Points" integer min={1} bind:value={points} />
+```
+
+### Chart legend (`src/base/chart/chart-legend.svelte`, `chart-legend-item.svelte`)
+
+Legend row for the Analytics charts. `ChartLegend` renders one `ChartLegendItem` per entry and keys each row by label plus index, so two series with the same label still render. Items truncate their label and reveal the full text in a tooltip on hover or focus.
+
+| Prop        | Type                      | Default     | Purpose                                                |
+| ----------- | ------------------------- | ----------- | ------------------------------------------------------ |
+| `items`     | `ChartLegendItem[]`       | —           | Series to list: `label`, `color`, optional `value`, `dashed` |
+| `showValue` | `boolean`                 | `true`      | Show each item's `value` in parentheses                |
+| `class`     | `string`                  | `'ui:mt-4'` | Extra classes on the row                               |
+
+`ChartLegendItem` takes a single `item` plus the same `showValue`. A `dashed` item draws a dashed swatch instead of a solid one, for reference lines such as a target or pass mark. Import it directly rather than through the `@cio/ui/base/chart` barrel when a host renders on the server (the barrel pulls in layerchart).
+
+```svelte
+<script lang="ts">
+  import ChartLegend from '@cio/ui/base/chart/chart-legend.svelte';
+</script>
+
+<ChartLegend items={[{ label: 'Graduates', color: 'var(--chart-1)', value: 128 }]} />
+```
+
+### Copy input (`src/custom/copy-input/`)
+
+Read-only `InputGroup` that shows a value with an inline Copy button. Focusing the input selects the value; the button switches to the copied label for two seconds. Use it to reveal a one-time secret, an invite link, or any value the user should copy rather than edit. The host passes translated labels.
+
+```svelte
+<script lang="ts">
+  import { CopyInput } from '@cio/ui/custom/copy-input';
+</script>
+
+<CopyInput
+  value={secret}
+  copyLabel={$t('automation.keys.reveal.copy')}
+  copiedLabel={$t('automation.keys.reveal.copied')}
+/>
+```
+
+### AI client badge (`src/custom/ai-client-badge/`)
+
+`AiClientBadge` shows which AI client or integration made a change. Pass the stored `clientName`; matching is case-insensitive and loose, and covers the names clients send as MCP `clientInfo.name` or register as an OAuth client name (`claude-ai`, `claude-code`, `codex-mcp-client`, `cursor-vscode`, `Visual Studio Code`, `gemini-cli-mcp-client`, `goose-cli`, `openai-mcp`, and so on). `resolveAiClient(name)` returns `{ kind, label, iconPath }` for logic outside the badge.
+
+- Logo and display name: Claude, Claude Code, ChatGPT, Cursor, OpenCode, GitHub Copilot, Gemini CLI, Zed, Warp, Windsurf, Amp, Cline.
+- Monogram and display name (no verifiable logo source): Codex, VS Code, Goose, Factory Droid, Devin, Kiro, Grok, Muse Code.
+- Any other name: a monogram of its first letter and the name as reported.
+
+The logos are path data in `ai-client-icons.ts` (simple-icons, CC0, plus the OpenAI mark from lobe-icons, MIT), so nothing is fetched at render time. Each mark stays the property of its brand.
+
+### Hooks (`src/hooks/`)
+
+Reusable Svelte hooks are located in the `src/hooks/` directory. These are Svelte 5 runes-based utilities that can be used across components.
+
+**Available Hooks:**
+
+- `is-mobile.svelte.ts` - Media query hook for mobile breakpoints
+- `use-clipboard.svelte.ts` - Clipboard copy functionality with state management
+- `field-draft.svelte.ts` - Text draft separate from stored value that re-seeds only on external change, with live `input()` and blur-time `commit()`
+
+**Usage:**
+
+```svelte
+<script lang="ts">
+  import { isMobileStore } from '@cio/ui/hooks/is-mobile.svelte';
+  import { UseClipboard } from '@cio/ui/hooks/use-clipboard.svelte';
+</script>
+```
+
+### Tools (`src/tools/`)
+
+Utility functions and helpers are located in `src/tools/`. The main utility is the `cn` function for class name merging.
+
+### Dialog button hierarchy
+
+When a dialog has multiple actions in `Dialog.Footer`, use `size="sm"` on every button and follow this variant hierarchy (left to right):
+
+| Position            | Role                                               | Variant         |
+| ------------------- | -------------------------------------------------- | --------------- |
+| Left                | External / repeat action (e.g. "Create another …") | `secondary`     |
+| Right group (first) | Cancel / dismiss (e.g. "Later", "Cancel")          | `outline`       |
+| Right group (last)  | Main CTA (e.g. "Open now", "Save", "Create")       | default primary |
+
+Place the main CTA on the right; group cancel and primary together when both appear on the right.
+
+### Page layout (`src/base/page/`)
+
+Composable page shell used across dashboard list and settings screens. Import as `import * as Page from '@cio/ui/base/page'`.
+
+| Export                         | Purpose                                                      |
+| ------------------------------ | ------------------------------------------------------------ |
+| `Page.Root`                    | Flex column wrapper with minimum viewport height             |
+| `Page.Header`                  | Title row; pass `isSticky` to pin the header while scrolling |
+| `Page.HeaderContent`           | Title + subtitle column                                      |
+| `Page.Title` / `Page.Subtitle` | Page heading and description                                 |
+| `Page.Action`                  | Right-aligned header actions                                 |
+| `Page.Body`                    | Main content area (`child` snippet)                          |
+| `Page.BodyHeader`              | Toolbar inside the body                                      |
+| `Page.FloatingBar`             | Shell for the bar that rises from the bottom of a page       |
+| `Page.SettingsActions`         | Compact save/discard card for dirty settings forms           |
+
+**`Page.FloatingBar`** owns the dark pill itself: sticky at the bottom, centered, `z-50`, with a `pointer-events: none` wrapper so it does not block clicks beside it. `Page.SettingsActions` is built on it, and so is the audience selection bar, which is why the two look identical without either re-implementing the pill. Pass `show`, a `status` string (also announced to screen readers, since the bar appearing _is_ the notification), an optional `badge` snippet before the status, and the buttons as children.
+
+Set `fixed` to pin it to the viewport instead of sticking it to the end of the page content. **Anything rendered through `Page.Body`'s `child` snippet must use `fixed`**, because `Page.Body` sets `overflow-x-hidden` and a sticky bar inside a scroll container has no travel. It is a boolean rather than a `'sticky' | 'fixed'` union deliberately: the `ui:` prefix script rewrites class-like string literals, and turns `position === 'fixed'` into `position === 'ui:fixed'`, which never matches.
+
+See `Molecules/PageFloatingBar` in Storybook.
+
+**Settings pages:** Place `Page.SettingsActions` as the last child inside `Page.Root`, after `Page.Body`. The card uses `position: sticky; bottom: 0` so it stays pinned to the viewport bottom while you scroll, then settles into normal flow at the end of the page. Do not put `overflow` on `Page.Root` that would break sticky positioning (horizontal overflow on `Page.Body` is fine). The card is compact and centered (not full width) and **only renders when `hasChanges` is true**. Pass translated `statusLabel`, `discardLabel`, and `saveLabel` props from the dashboard. Save is a primary button; Discard is a secondary button. Use `disabled` to block Save only (Discard still follows `loading`). Use `contentClass` for extra classes on the inner card when needed.
+
+**`Page.Root` can come from a layout.** "Last child of `Page.Root`" is a runtime relationship, not a same-file one. Where a `+layout.svelte` owns the `Page.Root` and renders pages into it via `{@render children?.()}`, the page file itself contains only `Page.Header`, `Page.Body`, and `Page.SettingsActions` — that is correct and already satisfies the rule. Do **not** add a second `Page.Root` in the page: nesting them stacks two `min-h-[calc(100vh-48px)]` containers, drops the layout's width constraints, and shortens the sticky bar's containing block so it stops floating. Pages that rely on a layout-owned `Page.Root`:
+
+- `routes/(app)/org/[slug]/settings/+page.svelte` and `settings/org/+page.svelte`, `settings/customize-lms/+page.svelte`, `settings/notifications/+page.svelte` → `routes/(app)/org/[slug]/settings/+layout.svelte`
+- `routes/(app)/lms/settings/+page.svelte`, `routes/(app)/lms/settings/notifications/+page.svelte` → `routes/(app)/lms/settings/+layout.svelte`
+
+**Never render `Page.SettingsActions` from inside `Page.Body`.** That includes rendering it from a feature component that a route passes into `Page.Body`'s `child` snippet. `Page.Body` sets `overflow-x-hidden`, and CSS computes `overflow-y` to `auto` whenever the other axis is not `visible` — so `Page.Body` is a scroll container. It is sized by its content and never scrolls internally, so a sticky bar inside it has no travel and renders flat at the end of the content. Keep the bar a sibling of `Page.Body` and lift the dirty/saving state up to the route with `bind:this` and `bind:hasUnsavedChanges`, the way `routes/(app)/courses/[id]/settings/+page.svelte` does.
+
+The card also sits at `z-50`, matching the editor root so it paints above editor content (later in DOM wins the tie) while staying below body-portaled dialogs and sheets. The sticky wrapper is full width with `pointer-events: none` so it does not block clicks beside the compact card.
+
+| Prop           | Description                                            |
+| -------------- | ------------------------------------------------------ |
+| `hasChanges`   | When true, shows the floating save/discard card        |
+| `loading`      | Shows loading state on Save                            |
+| `disabled`     | Disables Save only (e.g. while not initialized)        |
+| `contentClass` | Extra classes on the inner card (width, padding, etc.) |
+| `statusLabel`  | Left-side status text (e.g. "Unsaved changes")         |
+| `discardLabel` | Discard button label                                   |
+| `saveLabel`    | Save button label                                      |
+| `onSave`       | Save handler                                           |
+| `onDiscard`    | Discard handler                                        |
+
+```svelte
+<Page.Root>
+  <Page.Header>...</Page.Header>
+  <Page.Body>
+    {#snippet child()}
+      <!-- form sections -->
+    {/snippet}
+  </Page.Body>
+  <Page.SettingsActions
+    hasChanges={hasUnsavedChanges}
+    loading={isSaving}
+    statusLabel={$t('common.unsaved_changes.label')}
+    discardLabel={$t('common.discard')}
+    saveLabel={$t('common.save_changes')}
+    onSave={handleSave}
+    onDiscard={handleDiscard}
+  />
+</Page.Root>
+```
+
+See `Molecules/Page` → **Settings Actions** in Storybook.
+
+## Importing `cn`
+
+The `cn` utility function is used throughout the codebase for merging Tailwind CSS classes. It combines `clsx` and `tailwind-merge` to handle class conflicts intelligently.
+
+**Import:**
+
+```typescript
+import { cn } from '../../tools';
+```
+
+**Example usage:**
+
+```svelte
+<script lang="ts">
+  import { cn } from '../../tools';
+
+  let { class: className } = $props();
+</script>
+
+<div class={cn('ui:bg-primary ui:text-white', className)}>Content</div>
+```
+
+The `cn` function is exported from `src/tools/index.ts` and is also available as a named export from the main package:
+
+```typescript
+import { cn } from '@cio/ui';
+```
+
+## Tailwind Prefix
+
+All Tailwind CSS classes in this package use a custom prefix: **`ui`**
+
+This ensures that styles don't conflict with other Tailwind configurations in consuming applications.
+
+**Usage:**
+
+```svelte
+<div class="ui:bg-primary ui:text-primary-foreground ui:rounded-md">Content</div>
+```
+
+**Note:** When adding new components or styles, always use the `ui:` prefix for all Tailwind classes.
+
+## Test hooks (`testId`)
+
+Optional `testId` props on form wrappers and buttons render `data-testid` for Playwright. Prefer roles/labels first; use `testId` when a flow needs a stable, locale-independent hook.
+
+Supported today: `InputField`, `TextareaField`, `CheckboxField`, `Button`. Fixed ids on `Page.SettingsActions` (`page-settings-save`, `page-settings-discard`).
+
+```svelte
+<InputField testId="course-settings-title" label="Title" bind:value={title} />
+<Button testId="course-create-submit">Create</Button>
+```
+
+Registry and naming rules: `e2e/README.md` and AGENTS.md § E2E test hooks.
+
+## Chevrons up down
+
+`ChevronsUpDownIcon` is the moving chevron pair. Hovering it splits the chevrons apart for 200ms, then they settle. Pass `animate` to play that motion from a parent, and `ariaHidden` when it sits next to a visible label.
+
+```svelte
+<script lang="ts">
+  import { ChevronsUpDownIcon } from '@cio/ui/custom/moving-icons';
+</script>
+
+<ChevronsUpDownIcon size={16} ariaHidden />
+```
+
+## Template card
+
+`TemplateCard` is the small course-template tile used on the courses page and in the template gallery. Pass `blank` for the empty plus tile, which uses a dashed border. Pass `loading` for the skeleton, `typeBadge` for the course-type chip, and `overlay` for a menu that sits outside the button.
+
+```svelte
+<TemplateCard title="Customer Onboarding" subtitle="by ClassroomIO" imageUrl={cover} />
+```
+
+## Component Exports
+
+Components are exported from the main `src/index.ts` file in an alphabetical order. There are two main export patterns:
+
+### Base Components
+
+Base components are exported as namespaced exports:
+
+```typescript
+export * as Button from './base/button';
+export * as Dialog from './base/dialog';
+export * as Tooltip from './base/tooltip';
+```
+
+**Usage:**
+
+```svelte
+<script lang="ts">
+  import { Button, Dialog, Tooltip } from '@cio/ui';
+</script>
+
+<Button.Root>Click me</Button.Root>
+<Dialog.Root>...</Dialog.Root>
+```
+
+### Custom Components
+
+Custom components may use namespaced exports or direct exports depending on their structure:
+
+```typescript
+// Namespaced
+export * as UnderlineTabs from './custom/underline-tabs';
+
+// Direct exports
+export { Chip } from './custom/chip';
+export { IconButton } from './custom/icon-button';
+```
+
+**Usage:**
+
+```svelte
+<script lang="ts">
+  import { UnderlineTabs, Chip, IconButton } from '@cio/ui';
+</script>
+```
+
+### Component Index Files
+
+Each component directory contains an `index.ts` file that exports the component and its types:
+
+```typescript
+// base/button/index.ts
+import Root, { type ButtonProps, buttonVariants } from './button.svelte';
+
+export { Root, Root as Button, type ButtonProps, buttonVariants };
+```
+
+## Adding New Components
+
+When adding a new component to this package, follow these steps:
+
+1. **Determine the location:**
+   - If it's from shadcn-svelte → add to `src/base/`
+   - If it's from another source or extends base components → add to `src/custom/`
+
+2. **Create the component structure:**
+   - Create a folder with the component name (kebab-case)
+   - Add the component file(s)
+   - Create an `index.ts` file for exports
+
+3. **Export from main index:**
+   - Add the export to `src/index.ts`
+
+4. **Add Tailwind prefix:**
+   - Run `pnpm prefix` to automatically add the `ui:` prefix to all Tailwind classes
+
+5. **Create a Storybook story:**
+   - **Required:** After adding a new component, you must add a story for it in `packages/storybook`
+   - See `packages/storybook/README.md` for detailed instructions on how to create stories
+   - Stories help document component usage and enable visual testing
+
+## Development
+
+### Scripts
+
+- `pnpm generate-css` - Generate CSS from Tailwind
+- `pnpm build` - Build the package
+- `pnpm dev` - Watch mode for CSS generation
+- `pnpm format` - Format code with Prettier
+- `pnpm prefix:list` - List files that need the `ui:` prefix (dry-run, exit 0)
+- `pnpm prefix:check` - Fail if any file under `src/` needs the `ui:` prefix
+- `pnpm prefix:check:staged` - Fail if **staged** `packages/ui` files need the prefix (pre-commit)
+- `pnpm prefix:check:changed` - Fail if **changed** `packages/ui` files need the prefix (CI; set `UI_PREFIX_GIT_BASE`)
+- `pnpm prefix` - Add `ui:` prefix to all Tailwind classes and format
+
+### Configuration
+
+- `components.json` - shadcn-svelte configuration
+- `jsrepo.json` - jsrepo configuration for component installation
+- `svelte.config.js` - Svelte configuration
+- `tsconfig.json` - TypeScript configuration
+
+### Public course mixed outline
+
+`PublicCourseSidebarSection.standalone` renders its items directly, without a section heading or collapse control. Group consecutive root lessons and exercises into one standalone entry, interleaved with section entries in course order. Standalone rows show the item type icon in the badge instead of a number, since numbers count position within a section. Standalone entries stay visible when `collapsibleSections` is enabled.
+
+`NumberBadge` renders its `children` snippet in place of `number`, for a badge that shows an icon.

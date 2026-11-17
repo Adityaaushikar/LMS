@@ -1,0 +1,63 @@
+import * as z from 'zod';
+
+const envSchema = z.object({
+  NODE_ENV: z.enum(['development', 'production', 'test']).default('development'),
+  REDIS_URL: z.string().min(1, 'REDIS_URL is required for the BullMQ worker'),
+  DATABASE_URL: z.string().optional(),
+  PRIVATE_DATABASE_URL: z.string().optional(),
+
+  /** Object storage (mirrors apps/api/src/config/env). Workers stream object bytes. */
+  OBJECT_STORAGE_ENDPOINT: z.string().optional(),
+  OBJECT_STORAGE_REGION: z.string().optional(),
+  OBJECT_STORAGE_ACCESS_KEY_ID: z.string().optional(),
+  OBJECT_STORAGE_SECRET_ACCESS_KEY: z.string().optional(),
+  OBJECT_STORAGE_FORCE_PATH_STYLE: z.string().optional(),
+  OBJECT_STORAGE_BUCKET_VIDEOS: z.string().optional(),
+  OBJECT_STORAGE_BUCKET_DOCUMENTS: z.string().optional(),
+  OBJECT_STORAGE_BUCKET_MEDIA: z.string().optional(),
+  OBJECT_STORAGE_MEDIA_PUBLIC_BASE_URL: z.string().optional(),
+  OBJECT_STORAGE_PUBLIC_ENDPOINT: z.string().optional(),
+
+  /** Cloudflare R2 fallback. */
+  CLOUDFLARE_ACCOUNT_ID: z.string().optional(),
+  CLOUDFLARE_ACCESS_KEY: z.string().optional(),
+  CLOUDFLARE_SECRET_ACCESS_KEY: z.string().optional(),
+  CLOUDFLARE_IMAGE_BUCKET_DOMAIN: z.string().optional(),
+
+  /** Concurrency tuning per worker process. */
+  MEDIA_WORKER_CONCURRENCY: z.string().optional(),
+  TRANSCRIBE_WORKER_CONCURRENCY: z.string().optional(),
+  EMAIL_WORKER_CONCURRENCY: z.string().optional(),
+  WEBHOOK_WORKER_CONCURRENCY: z.string().optional(),
+  HLS_DISPATCH_CONCURRENCY: z.string().optional(),
+
+  /**
+   * Fly.io machine that runs the HLS encoder. Unset disables dispatch, so the
+   * queue drains to `skipped` rather than backing up on an instance that has no
+   * encoder configured.
+   */
+  FLY_API_TOKEN: z.string().optional(),
+  FLY_APP_NAME: z.string().optional(),
+  FLY_ENCODER_REGION: z.string().optional(),
+  FLY_ENCODER_MACHINE_CPUS: z.string().optional(),
+  FLY_ENCODER_MACHINE_MEMORY_MB: z.string().optional(),
+  /** Ceiling on a downloaded source, passed to the machine (it inherits no fly.toml env). */
+  FLY_ENCODER_MAX_SOURCE_BYTES: z.string().optional(),
+  /** Where the encoder calls back to. Must be reachable from Fly. */
+  ENCODER_CALLBACK_API_URL: z.string().optional(),
+
+  /** Optional OpenAI key — when unset, transcribe-audio jobs no-op and OpenAI-backed agent runs fail config checks. */
+  OPENAI_API_KEY: z.string().optional(),
+
+  /** Supadata API key for YouTube caption fetching. Leave unset to disable YouTube transcript jobs. */
+  SUPADATA_API_KEY: z.string().optional(),
+  /** YouTube caption provider identifier (default 'supadata'). */
+  YOUTUBE_CAPTION_PROVIDER: z.string().optional()
+});
+
+export const env = envSchema.parse(process.env);
+
+/** Worker DB connection string (DATABASE_URL preferred, falls back to PRIVATE_DATABASE_URL). */
+export function resolveDatabaseUrl(): string {
+  return env.DATABASE_URL ?? env.PRIVATE_DATABASE_URL ?? '';
+}

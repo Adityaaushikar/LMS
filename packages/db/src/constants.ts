@@ -1,0 +1,56 @@
+const {
+  DASHBOARD_ORIGIN,
+  PUBLIC_IS_SELFHOSTED,
+  PUBLIC_SERVER_URL,
+  TRUSTED_ORIGINS: TRUSTED_ORIGINS_STRING
+} = process.env;
+
+const dashboardOrigin = DASHBOARD_ORIGIN?.trim().replace(/\/$/, '');
+
+const DEFAULT_TRUSTED_ORIGINS = [
+  'http://localhost:5173',
+  'https://localhost:5173',
+  'https://*.classroomio.com',
+  'https://*.myclassroomio.com',
+  // Common OIDC IdP discovery origins (SSO registration fetches .well-known/openid-configuration)
+  'https://accounts.google.com',
+  'https://account.google.com', // common typo for Google
+  'https://oauth2.googleapis.com', // Google token endpoint (from discovery)
+  'https://openidconnect.googleapis.com', // Google userinfo endpoint (from discovery)
+  'https://www.googleapis.com', // Google jwks_uri (from discovery)
+  'https://login.microsoftonline.com',
+  'https://login.live.com',
+  'https://auth0.com',
+  'https://login.okta.com'
+];
+
+export const TRUSTED_ORIGINS = [
+  ...DEFAULT_TRUSTED_ORIGINS,
+  ...(TRUSTED_ORIGINS_STRING
+    ? TRUSTED_ORIGINS_STRING.split(',')
+        .map((origin) => origin.trim())
+        .filter(Boolean)
+    : []),
+  ...(dashboardOrigin ? [dashboardOrigin] : [])
+];
+
+export const BASE_URL =
+  PUBLIC_IS_SELFHOSTED === 'true' && dashboardOrigin ? dashboardOrigin : PUBLIC_SERVER_URL || 'http://localhost:3002';
+
+const DEFAULT_APP_ORIGIN =
+  process.env.NODE_ENV === 'development' ? 'http://localhost:5173' : 'https://app.classroomio.com';
+
+export const APP_ORIGIN = dashboardOrigin || DEFAULT_APP_ORIGIN;
+
+export const OAUTH_ISSUER = `${APP_ORIGIN}/api/auth`;
+
+const CLOUD_MCP_URL = 'https://mcp.classroomio.com';
+
+const hasOwnMcpHost = PUBLIC_IS_SELFHOSTED === 'true' || process.env.NODE_ENV === 'development';
+
+export const MCP_RESOURCE = hasOwnMcpHost ? `${BASE_URL}/mcp` : CLOUD_MCP_URL;
+
+// MCP SDK clients (e.g. Claude Code) send `new URL(resource).href`, which adds a trailing slash to a bare origin.
+export const MCP_RESOURCE_IDENTIFIERS = [...new Set([MCP_RESOURCE, new URL(MCP_RESOURCE).href])];
+
+export const PUBLIC_API_RESOURCE = `${BASE_URL}/public-api/v1`;

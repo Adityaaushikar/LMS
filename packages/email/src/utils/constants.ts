@@ -1,0 +1,41 @@
+import { env } from '../config/env';
+
+export const EMAIL_IDS = [
+  'forgotPassword',
+  'inviteTeacher',
+  'teamRoleChanged',
+  'newsfeedComment',
+  'newsfeedPost',
+  'onPasswordReset',
+  'cohortGoalReminder',
+  'quizAssigned',
+  'sessionReminder',
+  'sessionUpdated',
+  'submissionGraded',
+  'submissionReceived',
+  'earlyAdopterReady',
+  'earlyAdopterReminder',
+  'studentLimitReached',
+  'studentLimitApproaching',
+  'paymentFailed',
+  'contentReportAlert',
+  'webhookFailing',
+  'webhookDisabled',
+  'studentCourseInvite',
+  'studentCourseCompletion',
+  'studentCourseWelcome',
+  'studentOrgInvite',
+  'studentCohortWelcome',
+  'studentProvePayment',
+  'teacherCourseWelcome',
+  'teacherStudentBuyRequest',
+  'teacherStudentJoined',
+  'verifyEmail',
+  'profileUpdated',
+  'welcome'
+] as const;
+
+const DEFAULT_EMAIL_FROM = '"Best from ClassroomIO" <notify@mail.classroomio.com>';
+
+export const EMAIL_FROM = env.SMTP_SENDER || DEFAULT_EMAIL_FROM;
+export const EMAIL_REPLY_TO = '"Best from ClassroomIO" <help@classroomio.com>';

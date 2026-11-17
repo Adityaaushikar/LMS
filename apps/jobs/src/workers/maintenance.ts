@@ -1,0 +1,340 @@
+import './../bootstrap';
+
+import { Queue, Worker } from 'bullmq';
+
+import { runTrackingRollupDaily, runTrackingRollupRecent } from '@cio/tracking';
+import { purgeAssetStorage } from '@cio/core/services/assets/assets';
+import { sendInstanceTelemetry } from '@cio/core/services/instance-telemetry';
+import { reconcileCourseRolesToOrgRole } from '@cio/core/services/organization/course-roles';
+import { pruneDeadLetterJobsOlderThan, reapStuckHlsEncodes, reapStuckMediaJobs } from '@cio/db/queries';
+import { deleteExpiredWebhookEvents, listWebhookIdsWithDueDeliveries } from '@cio/db/queries/webhook';
+import {
+  listEarlyAdopterClaimsDueForReminder,
+  markEarlyAdopterClaimReminded,
+  reconcileMemberLastActive
+} from '@cio/db/queries/organization';
+import { buildEarlyAdopterClaimUrl, deriveEarlyAdopterClaimToken } from '@cio/core/services/early-adopter/claim-token';
+import { capAutoBlockVersionsPerLocale, pruneAutoBlockVersions } from '@cio/db/queries/block/version';
+import { purgeExpiredDeletedBlocks, pruneLessonRevisions } from '@cio/db/queries/block';
+import {
+  JOB_NAMES,
+  QUEUE_NAMES,
+  ZAnalyticsDailyRollupPayload,
+  ZAssetStorageCleanupPayload,
+  ZCourseRoleReconcilePayload,
+  ZDeadLetterCleanupPayload,
+  ZEarlyAdopterClaimReminderPayload,
+  ZLessonVersionRetentionPayload,
+  ZMediaJobReapPayload,
+  ZMemberActivityReconcilePayload,
+  ZRetentionCompactPayload,
+  ZWebhookRetentionPayload,
+  createRedisConnection,
+  enqueueEmailSend,
+  enqueueWebhookDelivery
+} from '@cio/jobs';
+
+import { errorMessage } from '../utils/cancel';
+import { log } from '../utils/logger';
+
+const connection = createRedisConnection();
+
+const worker = new Worker(
+  QUEUE_NAMES.maintenance,
+  async (job) => {
+    if (job.name === JOB_NAMES.maintenance.deadLetterCleanup) {
+      const data = ZDeadLetterCleanupPayload.parse(job.data ?? {});
+      const cutoff = new Date(Date.now() - data.olderThanDays * 86_400 * 1_000).toISOString();
+      const deleted = await pruneDeadLetterJobsOlderThan(cutoff);
+      log.info('dead-letter-cleanup-done', { deleted, cutoff });
+      return { deleted };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.retentionCompact) {
+      ZRetentionCompactPayload.parse(job.data ?? {});
+      // Retention windows for media_job, job_step, email_delivery to be wired
+      // alongside their respective queries. Logged for now so the schedule
+      // is observable without silently dropping data.
+      log.info('retention-compact-noop', { reason: 'not-yet-implemented' });
+      return { compacted: 0 };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.lessonVersionRetention) {
+      const data = ZLessonVersionRetentionPayload.parse(job.data ?? {});
+      const thinned = await pruneAutoBlockVersions({
+        keepAllHours: data.keepAllHours,
+        hourlyDays: data.hourlyDays,
+        dailyDays: data.dailyDays
+      });
+      const capped = await capAutoBlockVersionsPerLocale(data.maxAutoPerLanguage);
+      const purgedBlocks = await purgeExpiredDeletedBlocks(data.deletedBlockDays);
+      const prunedRevisions = await pruneLessonRevisions({
+        keepAllDays: data.revisionKeepAllDays,
+        dailyDays: data.revisionDailyDays
+      });
+
+      log.info('lesson-version-retention-done', {
+        thinned,
+        capped,
+        purgedBlocks,
+        prunedRevisions,
+        keepAllHours: data.keepAllHours,
+        hourlyDays: data.hourlyDays,
+        dailyDays: data.dailyDays,
+        maxAutoPerLanguage: data.maxAutoPerLanguage
+      });
+
+      return { thinned, capped, purgedBlocks, prunedRevisions };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.mediaJobReap) {
+      const data = ZMediaJobReapPayload.parse(job.data ?? {});
+      const cutoffIso = new Date(Date.now() - data.staleAfterMinutes * 60 * 1_000).toISOString();
+      const reaped = await reapStuckMediaJobs(cutoffIso);
+
+      if (reaped.length > 0) {
+        log.warn('media-job-reap-done', {
+          reaped: reaped.length,
+          cutoffIso,
+          ids: reaped.map((row) => row.id)
+        });
+      }
+
+      // A dead encoder machine never calls /fail, so the asset would stay
+      // `converting` forever — and stay invisible, because the raw upload still
+      // plays. Sweep those to `failed` on the same cutoff.
+      const strandedEncodes = await reapStuckHlsEncodes(cutoffIso);
+      if (strandedEncodes.length > 0) {
+        log.warn('hls-encode-reap-done', {
+          reaped: strandedEncodes.length,
+          cutoffIso,
+          assetIds: strandedEncodes.map((row) => row.id)
+        });
+      }
+
+      return { reaped: reaped.length, strandedEncodes: strandedEncodes.length };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.assetStorageCleanup) {
+      const data = ZAssetStorageCleanupPayload.parse(job.data ?? {});
+      await purgeAssetStorage(data);
+      log.info('asset-storage-cleanup-done', {
+        assetId: data.assetId,
+        prefixes: data.prefixes.length,
+        keys: data.keys.length
+      });
+      return { assetId: data.assetId };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.courseRoleReconcile) {
+      const data = ZCourseRoleReconcilePayload.parse(job.data ?? {});
+      const demoted = await reconcileCourseRolesToOrgRole(data.organizationId, data.profileId);
+
+      if (demoted > 0) {
+        log.warn('course-role-reconcile-demoted', {
+          organizationId: data.organizationId,
+          profileId: data.profileId,
+          demoted
+        });
+      }
+
+      return { demoted };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.memberActivityReconcile) {
+      const data = ZMemberActivityReconcilePayload.parse(job.data ?? {});
+      const updated = await reconcileMemberLastActive(data.lookbackDays);
+      log.info('member-activity-reconcile-done', { updated, lookbackDays: data.lookbackDays });
+      return { updated };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.analyticsDailyRollup) {
+      const data = ZAnalyticsDailyRollupPayload.parse(job.data ?? {});
+      const results =
+        data.daysAgo === undefined
+          ? await runTrackingRollupRecent()
+          : [await runTrackingRollupDaily({ daysAgo: data.daysAgo })];
+
+      for (const result of results) {
+        log.info('analytics-rollup-done', result);
+      }
+
+      return results;
+    }
+
+    if (job.name === JOB_NAMES.maintenance.earlyAdopterClaimReminder) {
+      const data = ZEarlyAdopterClaimReminderPayload.parse(job.data ?? {});
+      const cutoff = new Date(Date.now() - data.remindAfterDays * 86_400 * 1_000).toISOString();
+      const due = await listEarlyAdopterClaimsDueForReminder(cutoff, data.batchSize);
+      let reminded = 0;
+
+      for (const claim of due) {
+        const claimUrl = buildEarlyAdopterClaimUrl(deriveEarlyAdopterClaimToken(claim.polarSubscriptionId));
+
+        await enqueueEmailSend(
+          { kind: 'template', template: 'earlyAdopterReminder', to: claim.email, fields: { claimUrl } },
+          { idempotencyKey: `early-adopter-reminder:${claim.polarSubscriptionId}` }
+        );
+        await markEarlyAdopterClaimReminded(claim.id);
+        reminded += 1;
+      }
+
+      log.info('early-adopter-claim-reminder-done', { due: due.length, reminded });
+      return { reminded };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.instanceTelemetry) {
+      const result = await sendInstanceTelemetry();
+      log.info('instance-telemetry-done', result);
+      return result;
+    }
+
+    if (job.name === JOB_NAMES.maintenance.webhookRetention) {
+      const data = ZWebhookRetentionPayload.parse(job.data ?? {});
+      const cutoff = new Date(Date.now() - data.olderThanDays * 86_400 * 1_000);
+      const deleted = await deleteExpiredWebhookEvents(cutoff);
+      log.info('webhook-retention-done', { deleted, cutoff: cutoff.toISOString() });
+      return { deleted };
+    }
+
+    if (job.name === JOB_NAMES.maintenance.webhookSweep) {
+      const webhookIds = await listWebhookIdsWithDueDeliveries();
+      await Promise.all(webhookIds.map((webhookId) => enqueueWebhookDelivery({ webhookId })));
+
+      if (webhookIds.length > 0) {
+        log.warn('webhook-sweep-requeued', { endpoints: webhookIds.length });
+      }
+
+      return { requeued: webhookIds.length };
+    }
+
+    throw new Error(`Unknown maintenance job: ${job.name}`);
+  },
+  { connection, concurrency: 1 }
+);
+
+/**
+ * BullMQ repeatable scheduler for the media-job reaper. `upsertJobScheduler`
+ * is idempotent on the scheduler id, so it's safe to call on every worker
+ * boot. Without this, stuck `media_job` rows would never get cleaned up.
+ */
+const MEDIA_JOB_REAP_INTERVAL_MS = 5 * 60 * 1_000;
+const INSTANCE_TELEMETRY_INTERVAL_MS = 7 * 86_400_000;
+const ANALYTICS_ROLLUP_CRON_PATTERN = '0 */2 * * *';
+// BullMQ requires a dedicated connection per Worker; give the Queue its own
+// so the scheduler upsert doesn't piggyback on the worker's blocking client.
+const schedulerConnection = createRedisConnection();
+const maintenanceQueue = new Queue(QUEUE_NAMES.maintenance, { connection: schedulerConnection });
+
+async function registerSchedulers(): Promise<void> {
+  try {
+    await maintenanceQueue.upsertJobScheduler(
+      'media-job-reap-scheduler',
+      { every: MEDIA_JOB_REAP_INTERVAL_MS },
+      { name: JOB_NAMES.maintenance.mediaJobReap, data: {} }
+    );
+    log.info('maintenance-scheduler-registered', {
+      name: JOB_NAMES.maintenance.mediaJobReap,
+      everyMs: MEDIA_JOB_REAP_INTERVAL_MS
+    });
+
+    await maintenanceQueue.upsertJobScheduler(
+      'analytics-daily-rollup-scheduler',
+      { pattern: ANALYTICS_ROLLUP_CRON_PATTERN },
+      { name: JOB_NAMES.maintenance.analyticsDailyRollup, data: {} }
+    );
+    log.info('analytics-rollup-scheduler-registered', {
+      name: JOB_NAMES.maintenance.analyticsDailyRollup,
+      pattern: ANALYTICS_ROLLUP_CRON_PATTERN
+    });
+
+    await maintenanceQueue.upsertJobScheduler(
+      'member-activity-reconcile-scheduler',
+      { every: 86_400_000 },
+      { name: JOB_NAMES.maintenance.memberActivityReconcile, data: {} }
+    );
+    log.info('member-activity-reconcile-scheduler-registered', {
+      name: JOB_NAMES.maintenance.memberActivityReconcile,
+      everyMs: 86_400_000
+    });
+
+    await maintenanceQueue.upsertJobScheduler(
+      'lesson-version-retention-scheduler',
+      { every: 86_400_000 },
+      { name: JOB_NAMES.maintenance.lessonVersionRetention, data: {} }
+    );
+    log.info('lesson-version-retention-scheduler-registered', {
+      name: JOB_NAMES.maintenance.lessonVersionRetention,
+      everyMs: 86_400_000
+    });
+
+    await maintenanceQueue.upsertJobScheduler(
+      'early-adopter-claim-reminder-scheduler',
+      { every: 86_400_000 },
+      { name: JOB_NAMES.maintenance.earlyAdopterClaimReminder, data: {} }
+    );
+    log.info('early-adopter-claim-reminder-scheduler-registered', {
+      name: JOB_NAMES.maintenance.earlyAdopterClaimReminder,
+      everyMs: 86_400_000
+    });
+
+    // BullMQ runs a new `every` scheduler immediately, then keeps its slot across restarts,
+    // so the first run is the instance's first_start ping and later runs are weekly.
+    // Retries cover a first run that lands before the api has applied migrations.
+    await maintenanceQueue.upsertJobScheduler(
+      'instance-telemetry-scheduler',
+      { every: INSTANCE_TELEMETRY_INTERVAL_MS },
+      {
+        name: JOB_NAMES.maintenance.instanceTelemetry,
+        data: {},
+        opts: { attempts: 6, backoff: { type: 'exponential', delay: 60_000 } }
+      }
+    );
+    log.info('instance-telemetry-scheduler-registered', {
+      name: JOB_NAMES.maintenance.instanceTelemetry,
+      everyMs: INSTANCE_TELEMETRY_INTERVAL_MS
+    });
+
+    await maintenanceQueue.upsertJobScheduler(
+      'webhook-retention-scheduler',
+      { every: 86_400_000 },
+      { name: JOB_NAMES.maintenance.webhookRetention, data: {} }
+    );
+    log.info('webhook-retention-scheduler-registered', {
+      name: JOB_NAMES.maintenance.webhookRetention,
+      everyMs: 86_400_000
+    });
+
+    await maintenanceQueue.upsertJobScheduler(
+      'webhook-sweep-scheduler',
+      { every: MEDIA_JOB_REAP_INTERVAL_MS },
+      { name: JOB_NAMES.maintenance.webhookSweep, data: {} }
+    );
+    log.info('webhook-sweep-scheduler-registered', {
+      name: JOB_NAMES.maintenance.webhookSweep,
+      everyMs: MEDIA_JOB_REAP_INTERVAL_MS
+    });
+  } catch (err) {
+    log.error('maintenance-scheduler-register-failed', { error: errorMessage(err) });
+  }
+}
+
+void registerSchedulers();
+
+worker.on('ready', () => log.info('maintenance-worker-ready'));
+worker.on('failed', (job, err) =>
+  log.error('maintenance-job-failed', { jobName: job?.name, error: errorMessage(err) })
+);
+worker.on('error', (err) => log.error('maintenance-worker-error', { error: errorMessage(err) }));
+
+const shutdown = async (signal: string) => {
+  log.info('maintenance-worker-shutdown', { signal });
+  await worker.close();
+  await maintenanceQueue.close();
+  await schedulerConnection.quit();
+  await connection.quit();
+  process.exit(0);
+};
+
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
